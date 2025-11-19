@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fairy Tale Generator</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #87CEEB 0%, #4A90E2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 600px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 10px;
+            color: #333;
+            font-weight: 600;
+            font-size: 1.1em;
+        }
+
+        input[type="file"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px dashed #DC143C;
+            border-radius: 10px;
+            background: #FFF5F5;
+            cursor: pointer;
+            font-size: 1em;
+        }
+
+        input[type="file"]:hover {
+            background: #FFE5E5;
+            border-color: #B01030;
+        }
+
+        .radio-group {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+        .radio-option {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .radio-option input[type="radio"] {
+            display: none;
+        }
+
+        .radio-option label {
+            display: block;
+            padding: 15px 20px;
+            border: 2px solid #ddd;
+            border-radius: 10px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: white;
+            font-weight: normal;
+        }
+
+        .radio-option input[type="radio"]:checked + label {
+            border-color: #DC143C;
+            background: #DC143C;
+            color: white;
+            font-weight: 600;
+        }
+
+        .radio-option label:hover {
+            border-color: #87CEEB;
+        }
+
+        /* Blue styling for story selection buttons */
+        .story-selection .radio-option input[type="radio"]:checked + label {
+            border-color: #4A90E2;
+            background: #4A90E2;
+            color: white;
+            font-weight: 600;
+        }
+
+        .story-selection .radio-option label:hover {
+            border-color: #87CEEB;
+        }
+
+        .submit-btn {
+            width: 100%;
+            padding: 18px;
+            background: linear-gradient(135deg, #87CEEB 0%, #DC143C 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.2em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin-top: 10px;
+        }
+
+        .submit-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(220, 20, 60, 0.4);
+        }
+
+        .submit-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .progress-container {
+            display: none;
+            margin-top: 30px;
+            padding: 20px;
+            background: #F0F8FF;
+            border-radius: 10px;
+        }
+
+        .progress-container.active {
+            display: block;
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 30px;
+            background: #e0e0e0;
+            border-radius: 15px;
+            overflow: hidden;
+            margin-bottom: 10px;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #87CEEB 0%, #DC143C 100%);
+            width: 0%;
+            transition: width 0.3s;
+            border-radius: 15px;
+        }
+
+        .progress-text {
+            text-align: center;
+            color: #333;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+
+        .status-message {
+            text-align: center;
+            color: #666;
+            margin-top: 10px;
+            font-style: italic;
+        }
+
+        .download-container {
+            display: none;
+            margin-top: 30px;
+            text-align: center;
+        }
+
+        .download-container.active {
+            display: block;
+        }
+
+        .download-btn {
+            padding: 18px 40px;
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.2em;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .download-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(40, 167, 69, 0.4);
+        }
+
+        .error-message {
+            display: none;
+            padding: 15px;
+            background: #fee;
+            border: 2px solid #fcc;
+            border-radius: 10px;
+            color: #c33;
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        .error-message.active {
+            display: block;
+        }
+
+        .preview-image {
+            max-width: 100%;
+            max-height: 200px;
+            margin-top: 10px;
+            border-radius: 10px;
+            display: none;
+        }
+
+        .preview-image.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>✨ Fairy Tale Generator ✨</h1>
+        <p class="subtitle">Create a personalized children's book in minutes</p>
+
+        <form id="storyForm" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="image">Upload Child's Photo</label>
+                <input type="file" id="image" name="image" accept="image/*" required>
+                <img id="preview" class="preview-image" alt="Preview">
+            </div>
+
+            <div class="form-group">
+                <label for="child_name">Child's Name</label>
+                <input type="text" id="child_name" name="child_name" placeholder="Enter child's name" required style="width: 100%; padding: 12px; border: 2px solid #ddd; border-radius: 10px; font-size: 1em;">
+            </div>
+
+            <div class="form-group">
+                <label>Choose a Story</label>
+                <div class="radio-group story-selection">
+                    <div class="radio-option">
+                        <input type="radio" id="jack" name="story_type" value="jack_and_the_beanstalk" required>
+                        <label for="jack">Jack and the Beanstalk</label>
+                    </div>
+                    <div class="radio-option">
+                        <input type="radio" id="lrrh" name="story_type" value="little_red_riding_hood" required>
+                        <label for="lrrh">Little Red Riding Hood</label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Gender</label>
+                <div class="radio-group">
+                    <div class="radio-option">
+                        <input type="radio" id="boy" name="gender" value="Boy" required>
+                        <label for="boy">Boy</label>
+                    </div>
+                    <div class="radio-option">
+                        <input type="radio" id="girl" name="gender" value="Girl" required>
+                        <label for="girl">Girl</label>
+                    </div>
+                </div>
+            </div>
+
+            <button type="submit" class="submit-btn" id="submitBtn">Generate Story 📚</button>
+        </form>
+
+        <div class="error-message" id="errorMessage"></div>
+
+        <div class="progress-container" id="progressContainer">
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+            <div class="progress-text" id="progressText">0%</div>
+            <div class="status-message" id="statusMessage">Starting...</div>
+        </div>
+
+        <div class="download-container" id="downloadContainer">
+            <a href="#" class="download-btn" id="downloadBtn">Download Your Book 📥</a>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('storyForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const statusMessage = document.getElementById('statusMessage');
+        const downloadContainer = document.getElementById('downloadContainer');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const errorMessage = document.getElementById('errorMessage');
+        const previewImg = document.getElementById('preview');
+        const imageInput = document.getElementById('image');
+
+        let sessionId = null;
+        let progressInterval = null;
+
+        // Image preview
+        imageInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    previewImg.src = e.target.result;
+                    previewImg.classList.add('active');
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        form.addEventListener('submit', async function(e) {
+            e.preventDefault();
+
+            // Hide error and download
+            errorMessage.classList.remove('active');
+            downloadContainer.classList.remove('active');
+
+            // Validate form
+            const formData = new FormData(form);
+            if (!formData.get('image') || !formData.get('story_type') || !formData.get('gender') || !formData.get('child_name')) {
+                showError('Please fill in all fields');
+                return;
+            }
+
+            // Disable submit button
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Generating...';
+
+            // Show progress
+            progressContainer.classList.add('active');
+            progressBar.style.width = '0%';
+            progressText.textContent = '0%';
+            statusMessage.textContent = 'Starting...';
+
+            try {
+                // Upload and start generation
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Upload failed');
+                }
+
+                sessionId = data.session_id;
+
+                // Start polling for progress
+                progressInterval = setInterval(checkProgress, 2000); // Check every 2 seconds
+                checkProgress(); // Immediate check
+
+            } catch (error) {
+                showError(error.message);
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Generate Story 📚';
+                progressContainer.classList.remove('active');
+            }
+        });
+
+        async function checkProgress() {
+            if (!sessionId) return;
+
+            try {
+                const response = await fetch(`/progress/${sessionId}`);
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Progress check failed');
+                }
+
+                // Update progress
+                const progress = data.progress || 0;
+                progressBar.style.width = `${progress}%`;
+                progressText.textContent = `${progress}%`;
+                statusMessage.textContent = data.status || 'Processing...';
+
+                // Check if complete
+                if (data.completed) {
+                    clearInterval(progressInterval);
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Generate Story 📚';
+
+                    // Show download button
+                    downloadBtn.href = `/download/${sessionId}`;
+                    downloadContainer.classList.add('active');
+                    progressContainer.classList.remove('active');
+                } else if (data.error) {
+                    clearInterval(progressInterval);
+                    throw new Error(data.error);
+                }
+
+            } catch (error) {
+                clearInterval(progressInterval);
+                showError(error.message);
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Generate Story 📚';
+            }
+        }
+
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorMessage.classList.add('active');
+        }
+    </script>
+</body>
+</html>

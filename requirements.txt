@@ -1,0 +1,11 @@
+Flask
+Flask-SocketIO
+openai
+Pillow
+reportlab
+requests
+Werkzeug
+gunicorn
+python-dotenv
+python-socketio
+python-engineio
