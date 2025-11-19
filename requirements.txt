@@ -10,3 +10,5 @@ python-dotenv
 python-socketio
 python-engineio
 better-profanity
+opencv-python
+numpy

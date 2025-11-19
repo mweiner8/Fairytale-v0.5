@@ -23,6 +23,8 @@ from dotenv import load_dotenv
 from flask_socketio import SocketIO
 from better_profanity import profanity
 from common_names import COMMON_FIRST_NAMES
+import cv2
+import numpy as np
 
 # Load environment variables from .env file
 load_dotenv()
@@ -123,6 +125,129 @@ def validate_child_name(name):
         return "Please enter a real first name (letters only, 2–20 characters)."
     
     return None  # Name is valid
+
+
+def validate_image(image_path):
+    """
+    Validate uploaded image for appropriateness and usability.
+    
+    Requirements:
+    - Face detection: Confirm exactly one human face is visible
+    - Image quality: Reject if blurry, underexposed, or overexposed
+    - Content safety: Use OpenAI's moderation API to block unsafe content
+    
+    Args:
+        image_path (str): Path to the image file to validate
+        
+    Returns:
+        tuple: (True, None) if valid, (False, error_message) if invalid
+    """
+    try:
+        # Read image with OpenCV
+        img = cv2.imread(image_path)
+        if img is None:
+            return False, "Could not read image file. Please upload a valid image."
+        
+        # 1. Face Detection - Check for exactly one face
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(30, 30)
+        )
+        
+        if len(faces) == 0:
+            return False, "Please upload a photo with exactly one face visible."
+        
+        if len(faces) > 1:
+            return False, "Please upload a photo with exactly one face visible."
+        
+        # 2. Image Quality Checks
+        
+        # 2a. Blur Detection using Laplacian variance
+        gray_for_blur = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        laplacian_var = cv2.Laplacian(gray_for_blur, cv2.CV_64F).var()
+        # Threshold: values below 100 typically indicate blurry images
+        if laplacian_var < 100:
+            return False, "Image too blurry or dark."
+        
+        # 2b. Exposure Check (brightness)
+        # Convert to HSV and check V (value/brightness) channel
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        v_channel = hsv[:, :, 2]
+        mean_brightness = np.mean(v_channel)
+        
+        # Underexposed: mean brightness < 50 (out of 255)
+        if mean_brightness < 50:
+            return False, "Image too blurry or dark."
+        
+        # Overexposed: mean brightness > 220 (out of 255)
+        if mean_brightness > 220:
+            return False, "Image too blurry or dark."
+        
+        # 3. Content Safety using OpenAI Moderation API
+        if openai_client:
+            try:
+                # Read image as base64 for moderation API
+                with open(image_path, 'rb') as img_file:
+                    image_data = img_file.read()
+                
+                # Use OpenAI's moderation endpoint for images
+                # Note: OpenAI moderation API works with text, but we can use the vision API
+                # to check content. However, moderation API is primarily for text.
+                # For image content safety, we'll use a combination approach:
+                # 1. Check if we can use the image analysis to detect inappropriate content
+                # 2. For now, we'll use a basic check - in production, you might want to use
+                #    a dedicated image moderation service
+                
+                # Convert image to base64
+                base64_image = base64.b64encode(image_data).decode('utf-8')
+                # Get image format
+                img_pil = Image.open(io.BytesIO(image_data))
+                img_format = img_pil.format.lower() if img_pil.format else 'jpeg'
+                img_pil.close()
+                mime_type = f'image/{img_format}'
+                image_url = f"data:{mime_type};base64,{base64_image}"
+                
+                # Use GPT-4 Vision to check for inappropriate content
+                # This is a safety check - we ask the model to identify if content is inappropriate
+                try:
+                    response = openai_client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "Is this image appropriate for a children's book? Respond with only 'YES' if appropriate, or 'NO' followed by a brief reason if inappropriate. Focus on: violence, adult content, inappropriate themes, or anything unsuitable for children."},
+                                    {"type": "image_url", "image_url": {"url": image_url}}
+                                ]
+                            }
+                        ],
+                        max_tokens=50
+                    )
+                    
+                    result = response.choices[0].message.content.strip().upper()
+                    if result.startswith('NO'):
+                        return False, "Image not appropriate for a children's book."
+                    
+                except Exception as vision_error:
+                    logger.warning(f"Vision API check failed: {vision_error}")
+                    # If vision check fails, we'll still proceed but log the warning
+                    # In production, you might want to be more strict here
+                    
+            except Exception as moderation_error:
+                logger.warning(f"Content safety check failed: {moderation_error}")
+                # If moderation check fails, we'll still proceed but log the warning
+                # In production, you might want to be more strict here
+        
+        # All checks passed
+        return True, None
+        
+    except Exception as e:
+        logger.error(f"Error validating image: {e}", exc_info=True)
+        return False, f"Error validating image: {str(e)}"
 
 
 def cleanup_old_sessions():
@@ -562,6 +687,17 @@ def upload():
         except Exception as e:
             logger.error(f"Failed to convert uploaded image to PNG: {e}")
             return jsonify({'error': 'Failed to convert uploaded image to supported format.'}), 400
+
+        # --- Validate image before starting generation ---
+        is_valid, validation_error = validate_image(file_path)
+        if not is_valid:
+            # Clean up the uploaded file if validation fails
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to clean up invalid image: {cleanup_error}")
+            return jsonify({'error': validation_error}), 400
 
         # Clean up old sessions periodically
         cleanup_old_sessions()
