@@ -528,6 +528,13 @@ def upload():
         if gender not in ['Boy', 'Girl']:
             return jsonify({'error': 'Invalid gender selection'}), 400
 
+        # Validate gender-story pairing
+        if gender == 'Boy' and story_type != 'jack_and_the_beanstalk':
+            return jsonify({'error': 'Story selection does not match gender selection. Boys can only select "Jack and the Beanstalk".'}), 400
+        
+        if gender == 'Girl' and story_type != 'little_red_riding_hood':
+            return jsonify({'error': 'Story selection does not match gender selection. Girls can only select "Little Red Riding Hood".'}), 400
+
         if not openai_api_key:
             return jsonify(
                 {'error': 'OpenAI API key not configured. Please set OPENAI_API_KEY environment variable.'}), 500

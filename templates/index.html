@@ -169,7 +169,7 @@
         .progress-bar {
             height: 100%;
             background: linear-gradient(90deg, #87CEEB 0%, #DC143C 100%);
-            width: 0%;
+            width: 0;
             transition: width 0.3s;
             border-radius: 15px;
         }
@@ -263,20 +263,6 @@
             </div>
 
             <div class="form-group">
-                <label>Choose a Story</label>
-                <div class="radio-group story-selection">
-                    <div class="radio-option">
-                        <input type="radio" id="jack" name="story_type" value="jack_and_the_beanstalk" required>
-                        <label for="jack">Jack and the Beanstalk</label>
-                    </div>
-                    <div class="radio-option">
-                        <input type="radio" id="lrrh" name="story_type" value="little_red_riding_hood" required>
-                        <label for="lrrh">Little Red Riding Hood</label>
-                    </div>
-                </div>
-            </div>
-
-            <div class="form-group">
                 <label>Gender</label>
                 <div class="radio-group">
                     <div class="radio-option">
@@ -286,6 +272,20 @@
                     <div class="radio-option">
                         <input type="radio" id="girl" name="gender" value="Girl" required>
                         <label for="girl">Girl</label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-group" id="storyGroup" style="display: none;">
+                <label>Choose a Story</label>
+                <div class="radio-group story-selection">
+                    <div class="radio-option" id="jackOption">
+                        <input type="radio" id="jack" name="story_type" value="jack_and_the_beanstalk">
+                        <label for="jack">Jack and the Beanstalk</label>
+                    </div>
+                    <div class="radio-option" id="lrrhOption">
+                        <input type="radio" id="lrrh" name="story_type" value="little_red_riding_hood">
+                        <label for="lrrh">Little Red Riding Hood</label>
                     </div>
                 </div>
             </div>
@@ -320,9 +320,77 @@
         const errorMessage = document.getElementById('errorMessage');
         const previewImg = document.getElementById('preview');
         const imageInput = document.getElementById('image');
+        const storyGroup = document.getElementById('storyGroup');
+        const jackOption = document.getElementById('jackOption');
+        const lrrhOption = document.getElementById('lrrhOption');
+        const jackRadio = document.getElementById('jack');
+        const lrrhRadio = document.getElementById('lrrh');
+        const boyRadio = document.getElementById('boy');
+        const girlRadio = document.getElementById('girl');
 
         let sessionId = null;
         let progressInterval = null;
+
+        // Gender-based story selection logic
+        function updateStoryOptions() {
+            const selectedGender = document.querySelector('input[name="gender"]:checked');
+            
+            if (!selectedGender) {
+                // No gender selected - hide story options
+                storyGroup.style.display = 'none';
+                jackRadio.checked = false;
+                lrrhRadio.checked = false;
+                jackRadio.required = false;
+                lrrhRadio.required = false;
+                updateSubmitButton();
+                return;
+            }
+
+            // Show story group
+            storyGroup.style.display = 'block';
+
+            // Show/hide story options based on gender
+            if (selectedGender.value === 'Boy') {
+                jackOption.style.display = 'block';
+                lrrhOption.style.display = 'none';
+                jackRadio.required = true;
+                lrrhRadio.required = false;
+                // Clear any previously selected story if it doesn't match
+                if (lrrhRadio.checked) {
+                    lrrhRadio.checked = false;
+                }
+            } else if (selectedGender.value === 'Girl') {
+                jackOption.style.display = 'none';
+                lrrhOption.style.display = 'block';
+                jackRadio.required = false;
+                lrrhRadio.required = true;
+                // Clear any previously selected story if it doesn't match
+                if (jackRadio.checked) {
+                    jackRadio.checked = false;
+                }
+            }
+
+            updateSubmitButton();
+        }
+
+        function updateSubmitButton() {
+            const selectedGender = document.querySelector('input[name="gender"]:checked');
+            const selectedStory = document.querySelector('input[name="story_type"]:checked');
+            
+            // Disable button if gender or story is not selected
+            submitBtn.disabled = !selectedGender || !selectedStory;
+        }
+
+        // Listen for gender changes
+        boyRadio.addEventListener('change', updateStoryOptions);
+        girlRadio.addEventListener('change', updateStoryOptions);
+
+        // Listen for story changes
+        jackRadio.addEventListener('change', updateSubmitButton);
+        lrrhRadio.addEventListener('change', updateSubmitButton);
+
+        // Initial state - disable submit button
+        submitBtn.disabled = true;
 
         // Image preview
         imageInput.addEventListener('change', function(e) {
@@ -346,8 +414,18 @@
 
             // Validate form
             const formData = new FormData(form);
-            if (!formData.get('image') || !formData.get('story_type') || !formData.get('gender') || !formData.get('child_name')) {
+            const gender = formData.get('gender');
+            const storyType = formData.get('story_type');
+            
+            if (!formData.get('image') || !storyType || !gender || !formData.get('child_name')) {
                 showError('Please fill in all fields');
+                return;
+            }
+
+            // Validate gender-story pairing
+            if ((gender === 'Boy' && storyType !== 'jack_and_the_beanstalk') ||
+                (gender === 'Girl' && storyType !== 'little_red_riding_hood')) {
+                showError('Story selection does not match gender selection');
                 return;
             }
 
