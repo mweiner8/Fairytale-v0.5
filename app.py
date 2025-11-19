@@ -7,6 +7,7 @@ import glob
 import io
 import base64
 import textwrap
+import re
 from datetime import datetime, timedelta
 import threading
 from flask import Flask, request, render_template, jsonify, send_file
@@ -20,6 +21,8 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.utils import ImageReader
 from dotenv import load_dotenv
 from flask_socketio import SocketIO
+from better_profanity import profanity
+from common_names import COMMON_FIRST_NAMES
 
 # Load environment variables from .env file
 load_dotenv()
@@ -76,6 +79,50 @@ CLEANUP_INTERVAL_HOURS = 24
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def validate_child_name(name):
+    """
+    Validate child's name input.
+    
+    Requirements:
+    - Must be 2-20 characters long
+    - Must contain only alphabetic characters (A-Z, case-insensitive)
+    - Must not contain profanity
+    - Must not contain digits or symbols
+    - Must be a real first name (not a nonsense word)
+    
+    Args:
+        name (str): The child's name to validate
+        
+    Returns:
+        str or None: Error message if invalid, None if valid
+    """
+    if not name:
+        return "Please enter a real first name (letters only, 2–20 characters)."
+    
+    # Check length
+    if len(name) < 2 or len(name) > 20:
+        return "Please enter a real first name (letters only, 2–20 characters)."
+    
+    # Check for only alphabetic characters (case-insensitive)
+    if not re.match(r'^[A-Za-z]+$', name):
+        return "Please enter a real first name (letters only, 2–20 characters)."
+    
+    # Check for profanity using better_profanity
+    try:
+        if profanity.contains_profanity(name):
+            return "Please enter a real first name (letters only, 2–20 characters)."
+    except Exception as e:
+        logger.warning(f"Error checking profanity: {e}")
+        # If profanity check fails, we'll still allow the name but log the warning
+    
+    # Check if it's a real first name (not a nonsense word like "Pizza", "Moo", "Keyboard")
+    name_lower = name.lower()
+    if name_lower not in COMMON_FIRST_NAMES:
+        return "Please enter a real first name (letters only, 2–20 characters)."
+    
+    return None  # Name is valid
 
 
 def cleanup_old_sessions():
@@ -456,8 +503,10 @@ def upload():
         if uploaded_file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
 
-        if not child_name:
-            return jsonify({'error': 'Child\'s name is required'}), 400
+        # Validate child's name
+        name_validation_error = validate_child_name(child_name)
+        if name_validation_error:
+            return jsonify({'error': name_validation_error}), 400
 
         # Validate file extension
         if not allowed_file(uploaded_file.filename):
