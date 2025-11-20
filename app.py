@@ -1,30 +1,30 @@
+import io
 import os
+import re
+import cv2
+import glob
 import json
 import time
 import uuid
-import logging
-import glob
-import io
 import base64
-import textwrap
-import re
-from datetime import datetime, timedelta
-import threading
-from flask import Flask, request, render_template, jsonify, send_file
-from werkzeug.utils import secure_filename
-from werkzeug.exceptions import RequestEntityTooLarge
-from PIL import Image, ImageDraw, ImageFont
-from openai import OpenAI
+import logging
 import requests
-from reportlab.lib.units import inch
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
+import textwrap
+import threading
+import numpy as np
+from openai import OpenAI
 from dotenv import load_dotenv
 from flask_socketio import SocketIO
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import inch
 from better_profanity import profanity
+from datetime import datetime, timedelta
+from werkzeug.utils import secure_filename
 from common_names import COMMON_FIRST_NAMES
-import cv2
-import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+from reportlab.lib.utils import ImageReader
+from werkzeug.exceptions import RequestEntityTooLarge
+from flask import Flask, request, render_template, jsonify, send_file
 
 # Load environment variables from .env file
 load_dotenv()
@@ -389,6 +389,17 @@ def add_text_to_image(source_img, text):
     return result_img
 
 
+def resize_image(img, target_size_in_pixels):
+    img_width, img_height = img.size
+    if img_width != img_height:
+        min_dim = min(img_width, img_height)
+        left = (img_width - min_dim) // 2
+        top = (img_height - min_dim) // 2
+        img = img.crop((left, top, left + min_dim, top + min_dim))
+    img = img.resize((target_size_in_pixels, target_size_in_pixels), Image.Resampling.LANCZOS)
+    return img
+
+
 def generate_page_with_ai(template_img, child_img_path, page_text, char_description, story_type):
     """
     Generate a complete page with child's face and text overlay using GPT Image editing.
@@ -404,16 +415,8 @@ def generate_page_with_ai(template_img, child_img_path, page_text, char_descript
         target_size = 1024
         template_work = template_img.copy().convert('RGB')
 
-        # Crop to square if needed
-        img_width, img_height = template_work.size
-        if img_width != img_height:
-            min_dim = min(img_width, img_height)
-            left = (img_width - min_dim) // 2
-            top = (img_height - min_dim) // 2
-            template_work = template_work.crop((left, top, left + min_dim, top + min_dim))
-
-        # Resize to 1024x1024 for gpt-image-1
-        template_work = template_work.resize((target_size, target_size), Image.Resampling.LANCZOS)
+        # Crop to square if needed and to 1024x1024 for gpt-image-1
+        template_work = resize_image(template_work, target_size)
 
         # Save temporary image for API upload
         temp_template_path = os.path.join(
@@ -479,13 +482,7 @@ def create_simple_pdf(images, output_path):
 
     for source_img in images:
         source_img = source_img.convert('RGB')
-        img_width, img_height = source_img.size
-        if img_width != img_height:
-            min_dim = min(img_width, img_height)
-            left = (img_width - min_dim) // 2
-            top = (img_height - min_dim) // 2
-            source_img = source_img.crop((left, top, left + min_dim, top + min_dim))
-        source_img = source_img.resize((target_pixels, target_pixels), Image.Resampling.LANCZOS)
+        source_img = resize_image(source_img, target_pixels)
 
         img_buffer = io.BytesIO()
         source_img.save(img_buffer, format='PNG', dpi=(120, 120))
