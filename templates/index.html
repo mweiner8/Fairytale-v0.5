@@ -454,9 +454,8 @@
 
                 sessionId = data.session_id;
 
-                // Start polling for progress
-                progressInterval = setInterval(checkProgress, 2000); // Check every 2 seconds
-                checkProgress(); // Immediate check
+                // Redirect to progress page
+                window.location.href = `/progress/${sessionId}`;
 
             } catch (error) {
                 showError(error.message);

@@ -14,7 +14,7 @@ import threading
 import numpy as np
 from openai import OpenAI
 from dotenv import load_dotenv
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, join_room
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 from better_profanity import profanity
@@ -50,6 +50,7 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 # Ensure directories exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
+os.makedirs(os.path.join(app.config['OUTPUT_FOLDER'], 'pages'), exist_ok=True)
 
 # Initialize OpenAI client
 openai_api_key = os.environ.get('OPENAI_API_KEY')
@@ -308,7 +309,26 @@ def analyze_image(image_path):
             max_tokens=200
         )
 
-        return response.choices[0].message.content
+        result = response.choices[0].message.content.strip()
+        
+        # Check if the API refused to analyze the image
+        refusal_indicators = [
+            "i'm sorry",
+            "i can't",
+            "i cannot",
+            "unable to",
+            "cannot describe",
+            "can't describe",
+            "refuse",
+            "not appropriate"
+        ]
+        
+        result_lower = result.lower()
+        if any(indicator in result_lower for indicator in refusal_indicators):
+            logger.warning(f"OpenAI refused to analyze image, using fallback description. Response: {result}")
+            return "a child with kind features, warm smile, and friendly appearance"
+        
+        return result
     except Exception as e:
         logger.error(f"Error analyzing image: {e}")
         return "a child with kind features"
@@ -500,28 +520,52 @@ def generate_book_async(session_id, image_path, story_type, gender, child_name):
             'progress': 0,
             'status': 'Starting...',
             'error': None,
-            'created_at': datetime.now().isoformat()
+            'created_at': datetime.now().isoformat(),
+            'pages': {},
+            'total_pages': 13  # Cover + 12 pages
         }
         logger.info(f"Starting book generation for session {session_id}")
 
         # Step 1: Analyze child's image
-        progress_tracker[session_id] = {'progress': 5, 'status': 'Analyzing child\'s photo...'}
+        progress_tracker[session_id].update({'progress': 5, 'status': 'Analyzing child\'s photo...'})
+        socketio.emit('progress_update', {
+            'session_id': session_id,
+            'progress': 5,
+            'status': 'Analyzing child\'s photo...'
+        }, room=session_id)
         character_description = analyze_image(image_path)
         logger.info(f"Character description: {character_description}")
 
         # Step 2: Load template story
-        progress_tracker[session_id] = {'progress': 10, 'status': 'Loading story template...'}
+        progress_tracker[session_id].update({'progress': 10, 'status': 'Loading story template...'})
+        socketio.emit('progress_update', {
+            'session_id': session_id,
+            'progress': 10,
+            'status': 'Loading story template...'
+        }, room=session_id)
         story_data = load_template_story(story_type, child_name)
 
         # Step 3: Load template images
-        progress_tracker[session_id] = {'progress': 15, 'status': 'Loading template images...'}
+        progress_tracker[session_id].update({'progress': 15, 'status': 'Loading template images...'})
+        socketio.emit('progress_update', {
+            'session_id': session_id,
+            'progress': 15,
+            'status': 'Loading template images...'
+        }, room=session_id)
         template_images = load_template_images(story_type)
 
         # Step 4: Generate complete pages with AI (face + text)
         images_for_pdf = []
+        pages_dir = os.path.join(app.config['OUTPUT_FOLDER'], 'pages', session_id)
+        os.makedirs(pages_dir, exist_ok=True)
 
-        # Process cover image
-        progress_tracker[session_id] = {'progress': 20, 'status': 'Creating cover page...'}
+        # Process cover image (page 0)
+        progress_tracker[session_id].update({'progress': 20, 'status': 'Creating cover page...'})
+        socketio.emit('progress_update', {
+            'session_id': session_id,
+            'progress': 20,
+            'status': 'Creating cover page...'
+        }, room=session_id)
         cover_img = template_images[0][1]
         cover_text = f"{story_data.get('title', '')}\n{story_data.get('subtitle', '')}"
 
@@ -534,16 +578,40 @@ def generate_book_async(session_id, image_path, story_type, gender, child_name):
             story_type
         )
         images_for_pdf.append(cover_with_face_and_text)
+        
+        # Save cover image
+        cover_path = os.path.join(pages_dir, 'cover.png')
+        cover_with_face_and_text.save(cover_path, 'PNG')
+        cover_url = f'/page_image/{session_id}/cover'
+        
+        # Update progress tracker and emit event
+        progress_tracker[session_id]['pages']['cover'] = {
+            'page_number': 0,
+            'image_url': cover_url,
+            'status': 'complete'
+        }
+        socketio.emit('page_complete', {
+            'session_id': session_id,
+            'page_number': 0,
+            'image_url': cover_url,
+            'status': 'complete',
+            'page_name': 'cover'
+        }, room=session_id)
 
         # Process story pages
         pages = story_data.get('pages', [])
         for idx, page_data in enumerate(pages):
             page_num = page_data.get('page_number', idx + 1)
             the_progress = 20 + int((idx + 1) / len(pages) * 75)
-            progress_tracker[session_id] = {
+            progress_tracker[session_id].update({
                 'progress': the_progress,
                 'status': f'Creating page {page_num} of {len(pages)}...'
-            }
+            })
+            socketio.emit('progress_update', {
+                'session_id': session_id,
+                'progress': the_progress,
+                'status': f'Creating page {page_num} of {len(pages)}...'
+            }, room=session_id)
 
             # Get template image
             if 1 <= page_num <= 12 and page_num < len(template_images):
@@ -559,6 +627,25 @@ def generate_book_async(session_id, image_path, story_type, gender, child_name):
                     story_type
                 )
                 images_for_pdf.append(complete_page)
+                
+                # Save page image
+                page_path = os.path.join(pages_dir, f'page_{page_num}.png')
+                complete_page.save(page_path, 'PNG')
+                page_url = f'/page_image/{session_id}/{page_num}'
+                
+                # Update progress tracker and emit event
+                progress_tracker[session_id]['pages'][f'page_{page_num}'] = {
+                    'page_number': page_num,
+                    'image_url': page_url,
+                    'status': 'complete'
+                }
+                socketio.emit('page_complete', {
+                    'session_id': session_id,
+                    'page_number': page_num,
+                    'image_url': page_url,
+                    'status': 'complete',
+                    'page_name': f'page_{page_num}'
+                }, room=session_id)
             else:
                 logger.warning(f"No image found for page {page_num}")
 
@@ -566,17 +653,26 @@ def generate_book_async(session_id, image_path, story_type, gender, child_name):
             time.sleep(1)
 
         # Step 5: Create PDF (simplified - no text needed)
-        progress_tracker[session_id] = {'progress': 95, 'status': 'Creating PDF...'}
+        progress_tracker[session_id].update({'progress': 95, 'status': 'Creating PDF...'})
+        socketio.emit('progress_update', {
+            'session_id': session_id,
+            'progress': 95,
+            'status': 'Creating PDF...'
+        }, room=session_id)
         output_path = os.path.join(app.config['OUTPUT_FOLDER'], f'{session_id}.pdf')
         create_simple_pdf(images_for_pdf, output_path)
 
-        progress_tracker[session_id] = {
+        progress_tracker[session_id].update({
             'progress': 100,
             'status': 'Complete!',
             'pdf_path': output_path,
             'completed': True,
             'completed_at': datetime.now().isoformat()
-        }
+        })
+        socketio.emit('generation_complete', {
+            'session_id': session_id,
+            'pdf_path': output_path
+        }, room=session_id)
         logger.info(f"Book generation completed for session {session_id}")
 
     except (OSError, IOError, FileNotFoundError) as file_error:
@@ -707,9 +803,11 @@ def upload():
         generation_thread.daemon = True
         generation_thread.start()
 
+        # Redirect to progress page
         return jsonify({
             'session_id': session_id,
-            'message': 'Generation started'
+            'message': 'Generation started',
+            'redirect': f'/progress/{session_id}'
         })
 
     except RequestEntityTooLarge:
@@ -731,11 +829,44 @@ def request_entity_too_large(error):
 
 @app.route('/progress/<session_id>')
 def progress(session_id):
-    """Get generation progress"""
+    """Display real-time progress page"""
+    if session_id not in progress_tracker:
+        return render_template('error.html', error='Invalid session ID'), 404
+    
+    return render_template('progress.html', session_id=session_id)
+
+
+@app.route('/api/progress/<session_id>')
+def api_progress(session_id):
+    """Get generation progress (API endpoint)"""
     if session_id not in progress_tracker:
         return jsonify({'error': 'Invalid session ID'}), 404
 
     return jsonify(progress_tracker[session_id])
+
+
+@app.route('/page_image/<session_id>/<page_identifier>')
+def page_image(session_id, page_identifier):
+    """Serve individual page images"""
+    if session_id not in progress_tracker:
+        return jsonify({'error': 'Invalid session ID'}), 404
+    
+    pages_dir = os.path.join(app.config['OUTPUT_FOLDER'], 'pages', session_id)
+    
+    # Handle cover or page number
+    if page_identifier == 'cover':
+        image_path = os.path.join(pages_dir, 'cover.png')
+    else:
+        try:
+            page_num = int(page_identifier)
+            image_path = os.path.join(pages_dir, f'page_{page_num}.png')
+        except ValueError:
+            return jsonify({'error': 'Invalid page identifier'}), 400
+    
+    if not os.path.exists(image_path):
+        return jsonify({'error': 'Page image not found'}), 404
+    
+    return send_file(image_path, mimetype='image/png')
 
 
 @app.route('/download/<session_id>')
@@ -765,6 +896,41 @@ def download(session_id):
     )
 
 
+@socketio.on('connect')
+def handle_connect():
+    """Handle client connection"""
+    logger.info('Client connected')
+
+
+@socketio.on('join_session')
+def handle_join_session(data):
+    """Handle client joining a session room"""
+    session_id = data.get('session_id')
+    if session_id:
+        join_room(session_id)
+        logger.info(f'Client joined session: {session_id}')
+        
+        # Send current progress if available
+        if session_id in progress_tracker:
+            socketio.emit('progress_update', {
+                'session_id': session_id,
+                'progress': progress_tracker[session_id].get('progress', 0),
+                'status': progress_tracker[session_id].get('status', 'Starting...')
+            }, room=session_id)
+            
+            # Send all completed pages
+            pages = progress_tracker[session_id].get('pages', {})
+            for page_name, page_info in pages.items():
+                if page_info.get('status') == 'complete':
+                    socketio.emit('page_complete', {
+                        'session_id': session_id,
+                        'page_number': page_info.get('page_number'),
+                        'image_url': page_info.get('image_url'),
+                        'status': 'complete',
+                        'page_name': page_name
+                    }, room=session_id)
+
+
 @app.route('/health')
 def health():
     """Health check endpoint for deployment monitoring"""
@@ -774,4 +940,4 @@ def health():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 3000))
     debug = os.environ.get('FLASK_ENV') != 'production'
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    socketio.run(app, host='0.0.0.0', port=port, debug=debug, allow_unsafe_werkzeug=True)

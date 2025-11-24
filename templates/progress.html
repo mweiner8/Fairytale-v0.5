@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Generating Your Book - Fairy Tale Generator</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #87CEEB 0%, #4A90E2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+
+        .progress-header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .progress-text {
+            font-size: 1.5em;
+            color: #333;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        .status-message {
+            color: #666;
+            font-style: italic;
+            margin-bottom: 20px;
+        }
+
+        .progress-bar-container {
+            width: 100%;
+            height: 30px;
+            background: #e0e0e0;
+            border-radius: 15px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #87CEEB 0%, #DC143C 100%);
+            width: 0;
+            transition: width 0.3s;
+            border-radius: 15px;
+        }
+
+        .pages-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .page-card {
+            background: #f8f9fa;
+            border: 2px solid #ddd;
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+            transition: all 0.3s;
+            position: relative;
+            min-height: 250px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .page-card.pending {
+            opacity: 0.5;
+            background: #f0f0f0;
+        }
+
+        .page-card.complete {
+            border-color: #28a745;
+            background: #f0fff4;
+            box-shadow: 0 4px 8px rgba(40, 167, 69, 0.2);
+        }
+
+        .page-card .page-number {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .page-card .page-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .page-card .page-image {
+            width: 100%;
+            height: auto;
+            border-radius: 8px;
+            display: none;
+            max-height: 200px;
+            object-fit: contain;
+        }
+
+        .page-card.complete .page-image {
+            display: block;
+        }
+
+        .page-card .loading-spinner {
+            display: block;
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #4A90E2;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        .page-card.complete .loading-spinner {
+            display: none;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .download-container {
+            display: none;
+            text-align: center;
+            margin-top: 30px;
+            padding: 20px;
+            background: #f0fff4;
+            border-radius: 10px;
+            border: 2px solid #28a745;
+        }
+
+        .download-container.active {
+            display: block;
+        }
+
+        .download-btn {
+            padding: 18px 40px;
+            background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.2em;
+            font-weight: 600;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .download-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(40, 167, 69, 0.4);
+        }
+
+        .error-message {
+            display: none;
+            padding: 15px;
+            background: #fee;
+            border: 2px solid #fcc;
+            border-radius: 10px;
+            color: #c33;
+            margin-top: 20px;
+            text-align: center;
+        }
+
+        .error-message.active {
+            display: block;
+        }
+
+        @media (max-width: 768px) {
+            .pages-grid {
+                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+                gap: 15px;
+            }
+
+            .container {
+                padding: 20px;
+            }
+
+            h1 {
+                font-size: 2em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>✨ Generating Your Book ✨</h1>
+        <p class="subtitle">Watch your personalized story come to life!</p>
+
+        <div class="progress-header">
+            <div class="progress-text" id="progressText">Page 0 of 12 complete</div>
+            <div class="status-message" id="statusMessage">Starting...</div>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+        </div>
+
+        <div class="pages-grid" id="pagesGrid"></div>
+
+        <div class="error-message" id="errorMessage"></div>
+
+        <div class="download-container" id="downloadContainer">
+            <h2 style="color: #28a745; margin-bottom: 15px;">🎉 Your book is ready! 🎉</h2>
+            <a href="#" class="download-btn" id="downloadBtn">Download Your Book 📥</a>
+        </div>
+    </div>
+
+    <script>
+        const sessionId = '{{ session_id }}';
+        const socket = io();
+        const pagesGrid = document.getElementById('pagesGrid');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const statusMessage = document.getElementById('statusMessage');
+        const downloadContainer = document.getElementById('downloadContainer');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const errorMessage = document.getElementById('errorMessage');
+
+        const pages = {};
+        const totalPages = 12; // 12 story pages (cover is page 0)
+
+        // Initialize page cards
+        function initializePages() {
+            // Create cover card
+            const coverCard = createPageCard(0, 'Cover');
+            pagesGrid.appendChild(coverCard);
+            pages[0] = { card: coverCard, status: 'pending' };
+
+            // Create story page cards
+            for (let i = 1; i <= totalPages; i++) {
+                const pageCard = createPageCard(i, `Page ${i}`);
+                pagesGrid.appendChild(pageCard);
+                pages[i] = { card: pageCard, status: 'pending' };
+            }
+        }
+
+        function createPageCard(pageNumber, label) {
+            const card = document.createElement('div');
+            card.className = 'page-card pending';
+            card.id = `page-${pageNumber}`;
+            card.innerHTML = `
+                <div class="page-number">${label}</div>
+                <div class="page-label">${pageNumber === 0 ? 'Cover Page' : `Story Page ${pageNumber}`}</div>
+                <div class="loading-spinner"></div>
+                <img class="page-image" alt="${label}" />
+            `;
+            return card;
+        }
+
+        function updatePageCard(pageNumber, imageUrl) {
+            if (pages[pageNumber]) {
+                const card = pages[pageNumber].card;
+                card.classList.remove('pending');
+                card.classList.add('complete');
+                const img = card.querySelector('.page-image');
+                img.src = imageUrl;
+                pages[pageNumber].status = 'complete';
+                updateProgressText();
+            }
+        }
+
+        function updateProgressText() {
+            const completedCount = Object.values(pages).filter(p => p.status === 'complete').length;
+            const total = totalPages + 1; // +1 for cover
+            progressText.textContent = `Page ${completedCount} of ${total} complete`;
+        }
+
+        function updateProgressBar(progress) {
+            progressBar.style.width = `${progress}%`;
+        }
+
+        function showError(message) {
+            errorMessage.textContent = message;
+            errorMessage.classList.add('active');
+        }
+
+        // Socket.IO event handlers
+        socket.on('connect', () => {
+            console.log('Connected to server');
+            socket.emit('join_session', { session_id: sessionId });
+        });
+
+        socket.on('page_complete', (data) => {
+            console.log('Page complete:', data);
+            if (data.session_id === sessionId) {
+                const pageNumber = data.page_number;
+                const imageUrl = data.image_url;
+                updatePageCard(pageNumber, imageUrl);
+            }
+        });
+
+        socket.on('progress_update', (data) => {
+            console.log('Progress update:', data);
+            if (data.session_id === sessionId) {
+                updateProgressBar(data.progress);
+                statusMessage.textContent = data.status || 'Processing...';
+            }
+        });
+
+        socket.on('generation_complete', (data) => {
+            console.log('Generation complete:', data);
+            if (data.session_id === sessionId) {
+                downloadBtn.href = `/download/${sessionId}`;
+                downloadContainer.classList.add('active');
+                statusMessage.textContent = 'Complete! Your book is ready to download.';
+                updateProgressBar(100);
+            }
+        });
+
+        socket.on('disconnect', () => {
+            console.log('Disconnected from server');
+            showError('Connection lost. Please refresh the page.');
+        });
+
+        socket.on('connect_error', (error) => {
+            console.error('Connection error:', error);
+            showError('Failed to connect to server. Please refresh the page.');
+        });
+
+        // Initialize on page load
+        initializePages();
+
+        // Fallback: Poll for progress if Socket.IO fails
+        let fallbackInterval = null;
+        setTimeout(() => {
+            if (!socket.connected) {
+                console.log('Socket.IO not connected, using fallback polling');
+                fallbackInterval = setInterval(async () => {
+                    try {
+                        const response = await fetch(`/api/progress/${sessionId}`);
+                        const data = await response.json();
+                        
+                        if (data.error) {
+                            showError(data.error);
+                            clearInterval(fallbackInterval);
+                            return;
+                        }
+
+                        updateProgressBar(data.progress || 0);
+                        statusMessage.textContent = data.status || 'Processing...';
+
+                        // Update completed pages
+                        const completedPages = data.pages || {};
+                        for (const [pageName, pageInfo] of Object.entries(completedPages)) {
+                            if (pageInfo.status === 'complete') {
+                                const pageNumber = pageInfo.page_number;
+                                if (pages[pageNumber] && pages[pageNumber].status !== 'complete') {
+                                    updatePageCard(pageNumber, pageInfo.image_url);
+                                }
+                            }
+                        }
+
+                        // Check if complete
+                        if (data.completed) {
+                            clearInterval(fallbackInterval);
+                            downloadBtn.href = `/download/${sessionId}`;
+                            downloadContainer.classList.add('active');
+                            statusMessage.textContent = 'Complete! Your book is ready to download.';
+                            updateProgressBar(100);
+                        }
+                    } catch (error) {
+                        console.error('Error fetching progress:', error);
+                    }
+                }, 2000);
+            }
+        }, 3000);
+    </script>
+</body>
+</html>
