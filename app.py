@@ -13,8 +13,8 @@ import textwrap
 import threading
 import numpy as np
 from openai import OpenAI
+from threading import Lock
 from dotenv import load_dotenv
-from flask_socketio import SocketIO, join_room
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 from better_profanity import profanity
@@ -23,7 +23,9 @@ from werkzeug.utils import secure_filename
 from common_names import COMMON_FIRST_NAMES
 from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib.utils import ImageReader
+from flask_socketio import SocketIO, join_room
 from werkzeug.exceptions import RequestEntityTooLarge
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Flask, request, render_template, jsonify, send_file
 
 # Load environment variables from .env file
@@ -76,8 +78,32 @@ STORY_TEMPLATES = {
     }
 }
 
+rate_limit_lock = Lock()
+rate_limit_timestamps = []
+
 progress_tracker = {}
 CLEANUP_INTERVAL_HOURS = 24
+
+
+def wait_for_rate_limit():
+    """Ensure we don't exceed 5 requests per minute"""
+    with rate_limit_lock:
+        now = time.time()
+        # Remove timestamps older than 60 seconds
+        rate_limit_timestamps[:] = [ts for ts in rate_limit_timestamps if now - ts < 60]
+
+        # If we've made 5 requests in the last minute, wait
+        while len(rate_limit_timestamps) >= 5:
+            sleep_time = 60 - (now - rate_limit_timestamps[0]) + 1
+            logger.info(f"Rate limit reached, waiting {sleep_time:.1f}s")
+            time.sleep(sleep_time)
+
+            # Re-check after sleeping
+            now = time.time()
+            rate_limit_timestamps[:] = [ts for ts in rate_limit_timestamps if now - ts < 60]
+
+        # Record this request timestamp BEFORE releasing the lock
+        rate_limit_timestamps.append(time.time())
 
 
 def allowed_file(filename):
@@ -463,7 +489,9 @@ Don't block out any of the image. Just make sure the text color is easily legibl
 
         logger.info(f"Running GPT Image edit for {character_name} on page...")
 
-        # ✅ Correct API for OpenAI Python SDK v2.7.1
+        # RATE LIMITING
+        wait_for_rate_limit()
+
         with open(temp_template_path, "rb") as img_file:
             response = openai_client.images.edit(
                 model="gpt-image-1",
@@ -493,6 +521,150 @@ Don't block out any of the image. Just make sure the text color is easily legibl
         except Exception as font_error:
             logger.error(f"❌ Fallback text overlay failed: {font_error}")
             return template_img
+
+
+def generate_page_image(page_data, session_id, image_path, character_description, story_type, template_images, pages_dir):
+    """
+    Generate a single page image with retry logic and error handling.
+    This function is designed to be called concurrently by ThreadPoolExecutor.
+    
+    Args:
+        page_data: Dictionary containing page information (page_number, text, etc.)
+        session_id: Session identifier for progress tracking
+        image_path: Path to the child's uploaded image
+        character_description: Description of the child's features
+        story_type: Type of story being generated
+        template_images: List of template images
+        pages_dir: Directory to save page images
+        
+    Returns:
+        tuple: (page_number, success, result_image, error_message, timing_info)
+    """
+    start_time = time.time()
+    page_num = page_data.get('page_number', 0)
+    page_text = page_data.get('text', '')
+    thread_id = threading.current_thread().ident
+    
+    logger.info(f"[Thread {thread_id}] Starting generation for page {page_num}")
+    
+    try:
+        # Get template image
+        if page_num == 0:
+            # Cover page
+            if len(template_images) > 0:
+                template_img = template_images[0][1]
+            else:
+                raise ValueError("Cover template image not found")
+        elif 1 <= page_num <= 12:
+            # Story pages (index 1-12 in template_images correspond to pages 1-12)
+            if page_num < len(template_images):
+                template_img = template_images[page_num][1]
+            else:
+                raise ValueError(f"Template image not found for page {page_num}")
+        else:
+            raise ValueError(f"Invalid page number: {page_num}")
+        
+        # Retry logic: attempt generation up to 2 times (initial + 1 retry)
+        max_retries = 2
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Generate complete page with AI (face + text)
+                complete_page = generate_page_with_ai(
+                    template_img,
+                    image_path,
+                    page_text,
+                    character_description,
+                    story_type
+                )
+                
+                # Save page image
+                if page_num == 0:
+                    page_path = os.path.join(pages_dir, 'cover.png')
+                    page_url = f'/page_image/{session_id}/cover'
+                    page_name = 'cover'
+                else:
+                    page_path = os.path.join(pages_dir, f'page_{page_num}.png')
+                    page_url = f'/page_image/{session_id}/{page_num}'
+                    page_name = f'page_{page_num}'
+                
+                complete_page.save(page_path, 'PNG')
+                
+                elapsed_time = time.time() - start_time
+                logger.info(f"[Thread {thread_id}] ✅ Page {page_num} completed in {elapsed_time:.2f}s")
+                
+                return (page_num, True, complete_page, None, {
+                    'thread_id': thread_id,
+                    'page_number': page_num,
+                    'elapsed_time': elapsed_time,
+                    'attempts': attempt + 1
+                })
+                
+            except Exception as api_error:
+                last_error = api_error
+                error_str = str(api_error).lower()
+                
+                # Check if it's a rate limit error
+                is_rate_limit = any(keyword in error_str for keyword in [
+                    'rate limit', 'rate_limit', '429', 'too many requests',
+                    'quota', 'limit exceeded'
+                ])
+                
+                if attempt < max_retries - 1:
+                    # Wait before retrying (exponential backoff)
+                    wait_time = (attempt + 1) * 2  # 2s, 4s, etc.
+                    if is_rate_limit:
+                        wait_time = (attempt + 1) * 5  # Longer wait for rate limits: 5s, 10s
+                    
+                    logger.warning(
+                        f"[Thread {thread_id}] ⚠️ Page {page_num} attempt {attempt + 1} failed: {last_error}. "
+                        f"Retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+                else:
+                    logger.error(
+                        f"[Thread {thread_id}] ❌ Page {page_num} failed after {max_retries} attempts: {last_error}"
+                    )
+        
+        # All retries failed - use fallback
+        logger.warning(f"[Thread {thread_id}] Using fallback for page {page_num}")
+        fallback_img = add_text_to_image(template_img, page_text)
+        
+        # Save fallback image
+        if page_num == 0:
+            page_path = os.path.join(pages_dir, 'cover.png')
+            page_url = f'/page_image/{session_id}/cover'
+            page_name = 'cover'
+        else:
+            page_path = os.path.join(pages_dir, f'page_{page_num}.png')
+            page_url = f'/page_image/{session_id}/{page_num}'
+            page_name = f'page_{page_num}'
+        
+        fallback_img.save(page_path, 'PNG')
+        
+        elapsed_time = time.time() - start_time
+        logger.info(f"[Thread {thread_id}] ✅ Page {page_num} completed (fallback) in {elapsed_time:.2f}s")
+        
+        return (page_num, True, fallback_img, f"Used fallback after {max_retries} failed attempts: {str(last_error)}", {
+            'thread_id': thread_id,
+            'page_number': page_num,
+            'elapsed_time': elapsed_time,
+            'attempts': max_retries,
+            'used_fallback': True
+        })
+        
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        error_msg = f"Failed to generate page {page_num}: {str(e)}"
+        logger.error(f"[Thread {thread_id}] ❌ {error_msg} (took {elapsed_time:.2f}s)")
+        
+        return (page_num, False, None, error_msg, {
+            'thread_id': thread_id,
+            'page_number': page_num,
+            'elapsed_time': elapsed_time,
+            'error': str(e)
+        })
 
 
 def create_simple_pdf(images, output_path):
@@ -598,59 +770,160 @@ def generate_book_async(session_id, image_path, story_type, gender, child_name):
             'page_name': 'cover'
         }, room=session_id)
 
-        # Process story pages
+        # Step 4b: Generate all story pages concurrently using ThreadPoolExecutor
         pages = story_data.get('pages', [])
+        total_pages = len(pages)
+        
+        # Update status to indicate concurrent generation (cover is already done, so start at 25%)
+        progress_tracker[session_id].update({
+            'progress': 25,
+            'status': f'Generating {total_pages} story pages concurrently...'
+        })
+        socketio.emit('progress_update', {
+            'session_id': session_id,
+            'progress': 25,
+            'status': f'Generating {total_pages} story pages concurrently...'
+        }, room=session_id)
+        
+        # Prepare page data for concurrent processing
+        page_tasks = []
         for idx, page_data in enumerate(pages):
             page_num = page_data.get('page_number', idx + 1)
-            the_progress = 20 + int((idx + 1) / len(pages) * 75)
-            progress_tracker[session_id].update({
-                'progress': the_progress,
-                'status': f'Creating page {page_num} of {len(pages)}...'
+            page_tasks.append({
+                'page_number': page_num,
+                'text': page_data.get('text', ''),
+                'index': idx
             })
-            socketio.emit('progress_update', {
-                'session_id': session_id,
-                'progress': the_progress,
-                'status': f'Creating page {page_num} of {len(pages)}...'
-            }, room=session_id)
-
-            # Get template image
-            if 1 <= page_num <= 12 and page_num < len(template_images):
-                template_img = template_images[page_num][1]
-                page_text = page_data.get('text', '')
-
-                # Generate complete page with AI (face + text)
-                complete_page = generate_page_with_ai(
-                    template_img,
+        
+        # Use ThreadPoolExecutor to generate pages concurrently
+        # Limit to 5 workers at a time to avoid overwhelming the API and reaching usage limits
+        max_workers = min(5, total_pages)
+        page_results = {}  # Dictionary to store results by page number
+        completed_count = 0
+        failed_count = 0
+        timing_logs = []
+        
+        logger.info(f"Starting concurrent generation of {total_pages} pages with {max_workers} workers")
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all page generation tasks
+            future_to_page = {}
+            for page_task in page_tasks:
+                future = executor.submit(
+                    generate_page_image,
+                    page_task,
+                    session_id,
                     image_path,
-                    page_text,
                     character_description,
-                    story_type
+                    story_type,
+                    template_images,
+                    pages_dir
                 )
-                images_for_pdf.append(complete_page)
-                
-                # Save page image
-                page_path = os.path.join(pages_dir, f'page_{page_num}.png')
-                complete_page.save(page_path, 'PNG')
-                page_url = f'/page_image/{session_id}/{page_num}'
-                
-                # Update progress tracker and emit event
-                progress_tracker[session_id]['pages'][f'page_{page_num}'] = {
-                    'page_number': page_num,
-                    'image_url': page_url,
-                    'status': 'complete'
-                }
-                socketio.emit('page_complete', {
-                    'session_id': session_id,
-                    'page_number': page_num,
-                    'image_url': page_url,
-                    'status': 'complete',
-                    'page_name': f'page_{page_num}'
-                }, room=session_id)
+                future_to_page[future] = page_task['page_number']
+            
+            # Process completed tasks as they finish
+            for future in as_completed(future_to_page):
+                page_num = future_to_page[future]
+                try:
+                    result = future.result()
+                    page_num_result, success, result_image, error_msg, timing_info = result
+                    
+                    # Log timing information
+                    timing_logs.append(timing_info)
+                    logger.info(
+                        f"Page {page_num_result} timing: {timing_info.get('elapsed_time', 0):.2f}s, "
+                        f"attempts: {timing_info.get('attempts', 1)}, "
+                        f"thread: {timing_info.get('thread_id', 'N/A')}"
+                    )
+                    
+                    if success and result_image:
+                        # Store result in dictionary (ordered by page number)
+                        page_results[page_num_result] = result_image
+                        completed_count += 1
+                        
+                        # Update progress in real-time (cover is 5%, pages are 25-95%)
+                        progress_per_page = 70 / total_pages
+                        current_progress = 25 + int(completed_count * progress_per_page)
+                        
+                        # Determine page name and URL
+                        if page_num_result == 0:
+                            page_name = 'cover'
+                            page_url = f'/page_image/{session_id}/cover'
+                        else:
+                            page_name = f'page_{page_num_result}'
+                            page_url = f'/page_image/{session_id}/{page_num_result}'
+                        
+                        # Update progress tracker
+                        progress_tracker[session_id]['pages'][page_name] = {
+                            'page_number': page_num_result,
+                            'image_url': page_url,
+                            'status': 'complete',
+                            'timing': timing_info
+                        }
+                        
+                        # Emit real-time progress update
+                        socketio.emit('page_complete', {
+                            'session_id': session_id,
+                            'page_number': page_num_result,
+                            'image_url': page_url,
+                            'status': 'complete',
+                            'page_name': page_name
+                        }, room=session_id)
+                        
+                        socketio.emit('progress_update', {
+                            'session_id': session_id,
+                            'progress': current_progress,
+                            'status': f'Completed {completed_count} of {total_pages} pages...'
+                        }, room=session_id)
+                        
+                        logger.info(f"✅ Page {page_num_result} completed successfully")
+                    else:
+                        failed_count += 1
+                        logger.error(f"❌ Page {page_num_result} failed: {error_msg}")
+                        
+                        # Even if generation failed, we should still try to continue
+                        # The page_results dictionary will be missing this page
+                        progress_tracker[session_id]['pages'][f'page_{page_num_result}'] = {
+                            'page_number': page_num_result,
+                            'status': 'failed',
+                            'error': error_msg
+                        }
+                        
+                except Exception as e:
+                    failed_count += 1
+                    logger.error(f"❌ Exception processing page {page_num}: {e}", exc_info=True)
+                    progress_tracker[session_id]['pages'][f'page_{page_num}'] = {
+                        'page_number': page_num,
+                        'status': 'failed',
+                        'error': str(e)
+                    }
+        
+        # Log performance summary
+        if timing_logs:
+            total_time = sum(t.get('elapsed_time', 0) for t in timing_logs)
+            avg_time = total_time / len(timing_logs)
+            max_time = max(t.get('elapsed_time', 0) for t in timing_logs)
+            min_time = min(t.get('elapsed_time', 0) for t in timing_logs)
+            logger.info(
+                f"Performance Summary - Total: {total_time:.2f}s, "
+                f"Avg: {avg_time:.2f}s, Max: {max_time:.2f}s, Min: {min_time:.2f}s, "
+                f"Completed: {completed_count}/{total_pages}, Failed: {failed_count}"
+            )
+        
+        # Check if we have enough pages to continue
+        if completed_count < total_pages:
+            logger.warning(
+                f"Only {completed_count} of {total_pages} pages completed successfully. "
+                f"Continuing with available pages."
+            )
+        
+        # Build images_for_pdf list in correct order (cover already added, then pages 1-12)
+        # Cover is already in images_for_pdf, so just add story pages in order
+        for page_num in range(1, 13):
+            if page_num in page_results:
+                images_for_pdf.append(page_results[page_num])
             else:
-                logger.warning(f"No image found for page {page_num}")
-
-            # Small delay to avoid rate limiting
-            time.sleep(1)
+                logger.warning(f"Page {page_num} missing from results, skipping in PDF")
 
         # Step 5: Create PDF (simplified - no text needed)
         progress_tracker[session_id].update({'progress': 95, 'status': 'Creating PDF...'})
