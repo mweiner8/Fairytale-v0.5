@@ -61,7 +61,7 @@ COMMON_FIRST_NAMES = {
     'jaylen', 'jaylin', 'jaylynn', 'jayme', 'jayson', 'jazlyn', 'jazmin', 'jazmine',
     'jazmyn', 'jazmyne', 'jean', 'jefferson', 'jeffrey', 'jelani', 'jennifer', 'jenny',
     'jensen', 'jeremiah', 'jeremias', 'jeremy', 'jericho', 'jermaine', 'jerome', 'jerry',
-    'jessica', 'jessie', 'jesus', 'jett', 'jewel', 'jillian', 'jimena', 'jimmy', 'joanna',
+    'jessica', 'jessie', 'jesus', 'jett', 'jewel', 'jillian', 'jim', 'jimena', 'jimmy', 'joanna',
     'joaquin', 'jocelyn', 'joe', 'joel', 'joelle', 'joey', 'johan', 'johanna', 'john',
     'johnathan', 'johnathon', 'johnny', 'jolie', 'jon', 'jonah', 'jonas', 'jonathan',
     'jonathon', 'jones', 'jordan', 'jordy', 'jordyn', 'jorge', 'jose', 'josef', 'joseph',

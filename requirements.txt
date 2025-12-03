@@ -12,3 +12,7 @@ python-engineio
 better-profanity
 opencv-python
 numpy
+Flask-SQLAlchemy
+psycopg2-binary
+alembic
+Flask-Migrate

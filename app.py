@@ -8,6 +8,7 @@ import time
 import uuid
 import base64
 import logging
+import db_utils
 import requests
 import textwrap
 import threading
@@ -15,6 +16,7 @@ import numpy as np
 from openai import OpenAI
 from threading import Lock
 from dotenv import load_dotenv
+from database import db, init_db
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import inch
 from better_profanity import profanity
@@ -23,6 +25,7 @@ from werkzeug.utils import secure_filename
 from common_names import COMMON_FIRST_NAMES
 from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib.utils import ImageReader
+from models import User, Book, Storyline, Log
 from flask_socketio import SocketIO, join_room
 from werkzeug.exceptions import RequestEntityTooLarge
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -57,6 +60,8 @@ os.makedirs(os.path.join(app.config['OUTPUT_FOLDER'], 'pages'), exist_ok=True)
 # Initialize OpenAI client
 openai_api_key = os.environ.get('OPENAI_API_KEY')
 USE_DALLE_GENERATION = os.environ.get('USE_DALLE_GENERATION', 'true').lower() == 'true'
+
+init_db(app)
 
 try:
     openai_client = OpenAI(api_key=openai_api_key) if openai_api_key else None
@@ -156,125 +161,109 @@ def validate_child_name(name):
 
 def validate_image(image_path):
     """
-    Validate uploaded image for appropriateness and usability.
-    
-    Requirements:
-    - Face detection: Confirm exactly one human face is visible
-    - Image quality: Reject if blurry, underexposed, or overexposed
-    - Content safety: Use OpenAI's moderation API to block unsafe content
-    
-    Args:
-        image_path (str): Path to the image file to validate
-        
-    Returns:
-        tuple: (True, None) if valid, (False, error_message) if invalid
+    Improved validation of uploaded child portrait photos.
+    More tolerant blur + brightness thresholds to avoid rejecting normal images.
     """
+
     try:
-        # Read image with OpenCV
         img = cv2.imread(image_path)
         if img is None:
-            return False, "Could not read image file. Please upload a valid image."
-        
-        # 1. Face Detection - Check for exactly one face
+            return False, "Could not read the image file. Please upload a valid image."
+
+        # ----------------------------------------------------
+        # 1. FACE DETECTION — same as your original
+        # ----------------------------------------------------
         face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(
             gray,
             scaleFactor=1.1,
             minNeighbors=5,
-            minSize=(30, 30)
+            minSize=(40, 40)
         )
-        
+
         if len(faces) == 0:
-            return False, "Please upload a photo with exactly one face visible."
-        
+            return False, "No face detected. Please upload a clear photo of one child."
         if len(faces) > 1:
-            return False, "Please upload a photo with exactly one face visible."
-        
-        # 2. Image Quality Checks
-        
-        # 2a. Blur Detection using Laplacian variance
-        gray_for_blur = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        laplacian_var = cv2.Laplacian(gray_for_blur, cv2.CV_64F).var()
-        # Threshold: values below 100 typically indicate blurry images
-        if laplacian_var < 100:
-            return False, "Image too blurry or dark."
-        
-        # 2b. Exposure Check (brightness)
-        # Convert to HSV and check V (value/brightness) channel
+            return False, "Multiple faces detected. Please upload a photo with exactly one child."
+
+        # ----------------------------------------------------
+        # 2. BLUR CHECK — relaxed threshold
+        # ----------------------------------------------------
+        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+        # Typical portrait photos often fall between 25–60
+        # Only extreme blur should be rejected
+        BLUR_THRESHOLD = 25
+
+        if laplacian_var < BLUR_THRESHOLD:
+            return False, "The photo is too blurry. Please upload a sharper image."
+
+        # ----------------------------------------------------
+        # 3. EXPOSURE CHECK — relaxed thresholds
+        # ----------------------------------------------------
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        v_channel = hsv[:, :, 2]
-        mean_brightness = np.mean(v_channel)
-        
-        # Underexposed: mean brightness < 50 (out of 255)
-        if mean_brightness < 50:
-            return False, "Image too blurry or dark."
-        
-        # Overexposed: mean brightness > 220 (out of 255)
-        if mean_brightness > 220:
-            return False, "Image too blurry or dark."
-        
-        # 3. Content Safety using OpenAI Moderation API
+        brightness = hsv[:, :, 2].mean()
+
+        # These ranges work well for portrait photos
+        MIN_BRIGHTNESS = 35     # (was 50)
+        MAX_BRIGHTNESS = 245    # (was 220)
+
+        if brightness < MIN_BRIGHTNESS:
+            return False, "The image is too dark. Try a brighter photo."
+        if brightness > MAX_BRIGHTNESS:
+            return False, "The image is too bright. Try a more evenly lit photo."
+
+        # ----------------------------------------------------
+        # 4. OPENAI CONTENT SAFETY — same logic, safer prompts
+        # ----------------------------------------------------
         if openai_client:
             try:
-                # Read image as base64 for moderation API
-                with open(image_path, 'rb') as img_file:
-                    image_data = img_file.read()
-                
-                # Use OpenAI's moderation endpoint for images
-                # Note: OpenAI moderation API works with text, but we can use the vision API
-                # to check content. However, moderation API is primarily for text.
-                # For image content safety, we'll use a combination approach:
-                # 1. Check if we can use the image analysis to detect inappropriate content
-                # 2. For now, we'll use a basic check - in production, you might want to use
-                #    a dedicated image moderation service
-                
-                # Convert image to base64
-                base64_image = base64.b64encode(image_data).decode('utf-8')
-                # Get image format
-                img_pil = Image.open(io.BytesIO(image_data))
-                img_format = img_pil.format.lower() if img_pil.format else 'jpeg'
-                img_pil.close()
-                mime_type = f'image/{img_format}'
-                image_url = f"data:{mime_type};base64,{base64_image}"
-                
-                # Use GPT-4 Vision to check for inappropriate content
-                # This is a safety check - we ask the model to identify if content is inappropriate
-                try:
-                    response = openai_client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": "Is this image appropriate for a children's book? Respond with only 'YES' if appropriate, or 'NO' followed by a brief reason if inappropriate. Focus on: violence, adult content, inappropriate themes, or anything unsuitable for children."},
-                                    {"type": "image_url", "image_url": {"url": image_url}}
-                                ]
-                            }
-                        ],
-                        max_tokens=50
-                    )
-                    
-                    result = response.choices[0].message.content.strip().upper()
-                    if result.startswith('NO'):
-                        return False, "Image not appropriate for a children's book."
-                    
-                except Exception as vision_error:
-                    logger.warning(f"Vision API check failed: {vision_error}")
-                    # If vision check fails, we'll still proceed but log the warning
-                    # In production, you might want to be more strict here
-                    
-            except Exception as moderation_error:
-                logger.warning(f"Content safety check failed: {moderation_error}")
-                # If moderation check fails, we'll still proceed but log the warning
-                # In production, you might want to be more strict here
-        
-        # All checks passed
+                with open(image_path, "rb") as f:
+                    data = f.read()
+
+                img_pil = Image.open(io.BytesIO(data))
+                fmt = img_pil.format.lower() if img_pil.format else "jpeg"
+                base64_img = base64.b64encode(data).decode("utf-8")
+                url = f"data:image/{fmt};base64,{base64_img}"
+
+                response = openai_client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": (
+                                        "Is this image safe for inclusion in a children's storybook? "
+                                        "Respond with ONLY 'YES' if safe. "
+                                        "Respond with 'NO: <reason>' if unsafe. "
+                                        "Check for nudity, violence, injury, blood, or disturbing content."
+                                    )
+                                },
+                                {"type": "image_url", "image_url": {"url": url}}
+                            ]
+                        }
+                    ],
+                    max_tokens=50
+                )
+
+                result = response.choices[0].message.content.strip().upper()
+                if result.startswith("NO"):
+                    return False, "Image not appropriate for children's content."
+
+            except Exception as e:
+                logger.warning(f"Content safety check failed: {e}")
+
+        # ----------------------------------------------------
+        # PASSED ALL CHECKS
+        # ----------------------------------------------------
         return True, None
-        
+
     except Exception as e:
         logger.error(f"Error validating image: {e}", exc_info=True)
-        return False, f"Error validating image: {str(e)}"
+        return False, f"Validation error: {str(e)}"
 
 
 def cleanup_old_sessions():
@@ -361,16 +350,37 @@ def analyze_image(image_path):
 
 
 def load_template_story(story_type, child_name):
+    """
+    Load story template from database instead of JSON files
+
+    Args:
+        story_type: Story type key (e.g., 'little_red_riding_hood')
+        child_name: Child's name to substitute in subtitle
+
+    Returns:
+        dict: Story data with title, subtitle, and pages
+    """
+    # Get story title from STORY_TEMPLATES constant
     template = STORY_TEMPLATES[story_type]
-    template_folder = os.path.join('templates', template['folder'])
-    text_json_path = os.path.join(template_folder, 'text.json')
+    story_title = template['title']
 
-    with open(text_json_path, 'r', encoding='utf-8') as json_file:
-        story_data = json.load(json_file)
+    # Fetch storyline from database
+    storyline = db_utils.get_storyline_by_name(story_title)
 
+    if not storyline:
+        logger.error(f"Storyline not found in database: {story_title}")
+        raise ValueError(f"Story template '{story_title}' not found in database")
+
+    # Get story data from database
+    story_data = storyline.pages_json.copy()
+
+    # Substitute child's name in subtitle
     subtitle = story_data.get('subtitle', '')
     subtitle = subtitle.replace("(child's name)", child_name)
     story_data['subtitle'] = subtitle
+
+    logger.info(f"Loaded story '{story_title}' from database with {len(story_data.get('pages', []))} pages")
+
     return story_data
 
 
@@ -687,274 +697,324 @@ def create_simple_pdf(images, output_path):
 
 def generate_book_async(session_id, image_path, story_type, gender, child_name):
     """Async function to generate the entire book using AI-generated pages"""
-    try:
-        progress_tracker[session_id] = {
-            'progress': 0,
-            'status': 'Starting...',
-            'error': None,
-            'created_at': datetime.now().isoformat(),
-            'pages': {},
-            'total_pages': 13  # Cover + 12 pages
-        }
-        logger.info(f"Starting book generation for session {session_id}")
+    with app.app_context():
+        try:
+            progress_tracker[session_id] = {
+                'progress': 0,
+                'status': 'Starting...',
+                'error': None,
+                'created_at': datetime.now().isoformat(),
+                'pages': {},
+                'total_pages': 13
+            }
+            logger.info(f"Starting book generation for session {session_id}")
 
-        # Step 1: Analyze child's image
-        progress_tracker[session_id].update({'progress': 5, 'status': 'Analyzing child\'s photo...'})
-        socketio.emit('progress_update', {
-            'session_id': session_id,
-            'progress': 5,
-            'status': 'Analyzing child\'s photo...'
-        }, room=session_id)
-        character_description = analyze_image(image_path)
-        logger.info(f"Character description: {character_description}")
-
-        # Step 2: Load template story
-        progress_tracker[session_id].update({'progress': 10, 'status': 'Loading story template...'})
-        socketio.emit('progress_update', {
-            'session_id': session_id,
-            'progress': 10,
-            'status': 'Loading story template...'
-        }, room=session_id)
-        story_data = load_template_story(story_type, child_name)
-
-        # Step 3: Load template images
-        progress_tracker[session_id].update({'progress': 15, 'status': 'Loading template images...'})
-        socketio.emit('progress_update', {
-            'session_id': session_id,
-            'progress': 15,
-            'status': 'Loading template images...'
-        }, room=session_id)
-        template_images = load_template_images(story_type)
-
-        # Step 4: Prepare all pages including cover
-        images_for_pdf = [None] * 13  # Placeholder list for all pages (0=cover, 1-12=story pages)
-        pages_dir = os.path.join(app.config['OUTPUT_FOLDER'], 'pages', session_id)
-        os.makedirs(pages_dir, exist_ok=True)
-
-        # Prepare page tasks including cover
-        pages = story_data.get('pages', [])
-        all_page_tasks = []
-
-        # Add cover as page 0
-        cover_text = f"{story_data.get('title', '')}\n{story_data.get('subtitle', '')}"
-        all_page_tasks.append({
-            'page_number': 0,
-            'text': cover_text,
-            'index': -1  # Special index for cover
-        })
-
-        # Add story pages 1-12
-        for idx, page_data in enumerate(pages):
-            page_num = page_data.get('page_number', idx + 1)
-            all_page_tasks.append({
-                'page_number': page_num,
-                'text': page_data.get('text', ''),
-                'index': idx
-            })
-
-        total_pages = len(all_page_tasks)  # Should be 13
-
-        # Step 5: Process pages in batches
-        # Batch 1: Cover + Pages 1-4 (5 pages)
-        # Batch 2: Pages 5-9 (5 pages)
-        # Batch 3: Pages 10-12 (3 pages)
-        batches = [
-            all_page_tasks[0:5],  # Cover (0) + Pages 1-4
-            all_page_tasks[5:10],  # Pages 5-9
-            all_page_tasks[10:13]  # Pages 10-12
-        ]
-
-        completed_count = 0
-        failed_count = 0
-        timing_logs = []
-
-        for batch_num, batch_tasks in enumerate(batches, 1):
-            batch_size = len(batch_tasks)
-            page_nums = [task['page_number'] for task in batch_tasks]
-
-            progress_tracker[session_id].update({
-                'progress': 20 + (batch_num - 1) * 25,
-                'status': f'Generating batch {batch_num}/3 (pages {page_nums})...'
-            })
+            # Step 1: Analyze child's image
+            progress_tracker[session_id].update({'progress': 5, 'status': 'Analyzing child\'s photo...'})
             socketio.emit('progress_update', {
                 'session_id': session_id,
-                'progress': 20 + (batch_num - 1) * 25,
-                'status': f'Generating batch {batch_num}/3...'
+                'progress': 5,
+                'status': 'Analyzing child\'s photo...'
+            }, room=session_id)
+            character_description = analyze_image(image_path)
+            logger.info(f"Character description: {character_description}")
+
+            # Step 2: Load template story
+            progress_tracker[session_id].update({'progress': 10, 'status': 'Loading story template...'})
+            socketio.emit('progress_update', {
+                'session_id': session_id,
+                'progress': 10,
+                'status': 'Loading story template...'
             }, room=session_id)
 
-            logger.info(f"Starting batch {batch_num} with {batch_size} pages: {page_nums}")
+            # ADD LOGGING HERE:
+            try:
+                story_data = load_template_story(story_type, child_name)
+                logger.info(f"✅ Successfully loaded story from database: {story_data.get('title')}")
+                logger.info(f"   - Subtitle: {story_data.get('subtitle')}")
+                logger.info(f"   - Pages: {len(story_data.get('pages', []))}")
+            except Exception as story_error:
+                logger.error(f"❌ Failed to load story from database: {story_error}")
+                raise
 
-            # Process this batch concurrently
-            max_workers = min(5, batch_size)
+            # Step 3: Load template images
+            progress_tracker[session_id].update({'progress': 15, 'status': 'Loading template images...'})
+            socketio.emit('progress_update', {
+                'session_id': session_id,
+                'progress': 15,
+                'status': 'Loading template images...'
+            }, room=session_id)
+            template_images = load_template_images(story_type)
 
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all page generation tasks for this batch
-                future_to_page = {}
-                for page_task in batch_tasks:
-                    future = executor.submit(
-                        generate_page_image,
-                        page_task,
-                        session_id,
-                        image_path,
-                        character_description,
-                        story_type,
-                        template_images,
-                        pages_dir
-                    )
-                    future_to_page[future] = page_task['page_number']
+            # Step 4: Prepare all pages including cover
+            images_for_pdf = [None] * 13  # Placeholder list for all pages (0=cover, 1-12=story pages)
+            pages_dir = os.path.join(app.config['OUTPUT_FOLDER'], 'pages', session_id)
+            os.makedirs(pages_dir, exist_ok=True)
 
-                # Process completed tasks as they finish
-                for future in as_completed(future_to_page):
-                    page_num = future_to_page[future]
-                    try:
-                        result = future.result()
-                        page_num_result, success, result_image, error_msg, timing_info = result
+            # Prepare page tasks including cover
+            pages = story_data.get('pages', [])
+            all_page_tasks = []
 
-                        # Log timing information
-                        timing_logs.append(timing_info)
-                        logger.info(
-                            f"Page {page_num_result} timing: {timing_info.get('elapsed_time', 0):.2f}s, "
-                            f"attempts: {timing_info.get('attempts', 1)}, "
-                            f"thread: {timing_info.get('thread_id', 'N/A')}"
+            # Add cover as page 0
+            cover_text = f"{story_data.get('title', '')}\n{story_data.get('subtitle', '')}"
+            all_page_tasks.append({
+                'page_number': 0,
+                'text': cover_text,
+                'index': -1  # Special index for cover
+            })
+
+            # Add story pages 1-12
+            for idx, page_data in enumerate(pages):
+                page_num = page_data.get('page_number', idx + 1)
+                all_page_tasks.append({
+                    'page_number': page_num,
+                    'text': page_data.get('text', ''),
+                    'index': idx
+                })
+
+            total_pages = len(all_page_tasks)  # Should be 13
+
+            # Step 5: Process pages in batches
+            # Batch 1: Cover + Pages 1-4 (5 pages)
+            # Batch 2: Pages 5-9 (5 pages)
+            # Batch 3: Pages 10-12 (3 pages)
+            batches = [
+                all_page_tasks[0:5],  # Cover (0) + Pages 1-4
+                all_page_tasks[5:10],  # Pages 5-9
+                all_page_tasks[10:13]  # Pages 10-12
+            ]
+
+            completed_count = 0
+            failed_count = 0
+            timing_logs = []
+
+            for batch_num, batch_tasks in enumerate(batches, 1):
+                batch_size = len(batch_tasks)
+                page_nums = [task['page_number'] for task in batch_tasks]
+
+                progress_tracker[session_id].update({
+                    'progress': 20 + (batch_num - 1) * 25,
+                    'status': f'Generating batch {batch_num}/3 (pages {page_nums})...'
+                })
+                socketio.emit('progress_update', {
+                    'session_id': session_id,
+                    'progress': 20 + (batch_num - 1) * 25,
+                    'status': f'Generating batch {batch_num}/3...'
+                }, room=session_id)
+
+                logger.info(f"Starting batch {batch_num} with {batch_size} pages: {page_nums}")
+
+                # Process this batch concurrently
+                max_workers = min(5, batch_size)
+
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Submit all page generation tasks for this batch
+                    future_to_page = {}
+                    for page_task in batch_tasks:
+                        future = executor.submit(
+                            generate_page_image,
+                            page_task,
+                            session_id,
+                            image_path,
+                            character_description,
+                            story_type,
+                            template_images,
+                            pages_dir
                         )
+                        future_to_page[future] = page_task['page_number']
 
-                        if success and result_image:
-                            # Store result in correct position
-                            images_for_pdf[page_num_result] = result_image
-                            completed_count += 1
+                    # Process completed tasks as they finish
+                    for future in as_completed(future_to_page):
+                        page_num = future_to_page[future]
+                        try:
+                            result = future.result()
+                            page_num_result, success, result_image, error_msg, timing_info = result
 
-                            # Update progress in real-time
-                            progress_per_page = 70 / total_pages
-                            current_progress = 20 + int(completed_count * progress_per_page)
+                            # Log timing information
+                            timing_logs.append(timing_info)
+                            logger.info(
+                                f"Page {page_num_result} timing: {timing_info.get('elapsed_time', 0):.2f}s, "
+                                f"attempts: {timing_info.get('attempts', 1)}, "
+                                f"thread: {timing_info.get('thread_id', 'N/A')}"
+                            )
 
-                            # Determine page name and URL
-                            if page_num_result == 0:
-                                page_name = 'cover'
-                                page_url = f'/page_image/{session_id}/cover'
+                            if success and result_image:
+                                # Store result in correct position
+                                images_for_pdf[page_num_result] = result_image
+                                completed_count += 1
+
+                                # Update progress in real-time
+                                progress_per_page = 70 / total_pages
+                                current_progress = 20 + int(completed_count * progress_per_page)
+
+                                # Determine page name and URL
+                                if page_num_result == 0:
+                                    page_name = 'cover'
+                                    page_url = f'/page_image/{session_id}/cover'
+                                else:
+                                    page_name = f'page_{page_num_result}'
+                                    page_url = f'/page_image/{session_id}/{page_num_result}'
+
+                                # Update progress tracker
+                                progress_tracker[session_id]['pages'][page_name] = {
+                                    'page_number': page_num_result,
+                                    'image_url': page_url,
+                                    'status': 'complete',
+                                    'timing': timing_info
+                                }
+
+                                # Emit real-time progress update
+                                socketio.emit('page_complete', {
+                                    'session_id': session_id,
+                                    'page_number': page_num_result,
+                                    'image_url': page_url,
+                                    'status': 'complete',
+                                    'page_name': page_name
+                                }, room=session_id)
+
+                                socketio.emit('progress_update', {
+                                    'session_id': session_id,
+                                    'progress': current_progress,
+                                    'status': f'Completed {completed_count} of {total_pages} pages...'
+                                }, room=session_id)
+
+                                logger.info(f"✅ Page {page_num_result} completed successfully")
                             else:
-                                page_name = f'page_{page_num_result}'
-                                page_url = f'/page_image/{session_id}/{page_num_result}'
+                                failed_count += 1
+                                logger.error(f"❌ Page {page_num_result} failed: {error_msg}")
 
-                            # Update progress tracker
-                            progress_tracker[session_id]['pages'][page_name] = {
-                                'page_number': page_num_result,
-                                'image_url': page_url,
-                                'status': 'complete',
-                                'timing': timing_info
-                            }
+                                # Mark as failed in progress tracker
+                                page_name = 'cover' if page_num_result == 0 else f'page_{page_num_result}'
+                                progress_tracker[session_id]['pages'][page_name] = {
+                                    'page_number': page_num_result,
+                                    'status': 'failed',
+                                    'error': error_msg
+                                }
 
-                            # Emit real-time progress update
-                            socketio.emit('page_complete', {
-                                'session_id': session_id,
-                                'page_number': page_num_result,
-                                'image_url': page_url,
-                                'status': 'complete',
-                                'page_name': page_name
-                            }, room=session_id)
-
-                            socketio.emit('progress_update', {
-                                'session_id': session_id,
-                                'progress': current_progress,
-                                'status': f'Completed {completed_count} of {total_pages} pages...'
-                            }, room=session_id)
-
-                            logger.info(f"✅ Page {page_num_result} completed successfully")
-                        else:
+                        except Exception as e:
                             failed_count += 1
-                            logger.error(f"❌ Page {page_num_result} failed: {error_msg}")
-
-                            # Mark as failed in progress tracker
-                            page_name = 'cover' if page_num_result == 0 else f'page_{page_num_result}'
+                            logger.error(f"❌ Exception processing page {page_num}: {e}", exc_info=True)
+                            page_name = 'cover' if page_num == 0 else f'page_{page_num}'
                             progress_tracker[session_id]['pages'][page_name] = {
-                                'page_number': page_num_result,
+                                'page_number': page_num,
                                 'status': 'failed',
-                                'error': error_msg
+                                'error': str(e)
                             }
 
-                    except Exception as e:
-                        failed_count += 1
-                        logger.error(f"❌ Exception processing page {page_num}: {e}", exc_info=True)
-                        page_name = 'cover' if page_num == 0 else f'page_{page_num}'
-                        progress_tracker[session_id]['pages'][page_name] = {
-                            'page_number': page_num,
-                            'status': 'failed',
-                            'error': str(e)
-                        }
+                logger.info(f"Batch {batch_num} completed. Progress: {completed_count}/{total_pages}")
 
-            logger.info(f"Batch {batch_num} completed. Progress: {completed_count}/{total_pages}")
+            # Log performance summary
+            if timing_logs:
+                total_time = sum(t.get('elapsed_time', 0) for t in timing_logs)
+                avg_time = total_time / len(timing_logs)
+                max_time = max(t.get('elapsed_time', 0) for t in timing_logs)
+                min_time = min(t.get('elapsed_time', 0) for t in timing_logs)
+                logger.info(
+                    f"Performance Summary - Total: {total_time:.2f}s, "
+                    f"Avg: {avg_time:.2f}s, Max: {max_time:.2f}s, Min: {min_time:.2f}s, "
+                    f"Completed: {completed_count}/{total_pages}, Failed: {failed_count}"
+                )
 
-        # Log performance summary
-        if timing_logs:
-            total_time = sum(t.get('elapsed_time', 0) for t in timing_logs)
-            avg_time = total_time / len(timing_logs)
-            max_time = max(t.get('elapsed_time', 0) for t in timing_logs)
-            min_time = min(t.get('elapsed_time', 0) for t in timing_logs)
-            logger.info(
-                f"Performance Summary - Total: {total_time:.2f}s, "
-                f"Avg: {avg_time:.2f}s, Max: {max_time:.2f}s, Min: {min_time:.2f}s, "
-                f"Completed: {completed_count}/{total_pages}, Failed: {failed_count}"
-            )
+            # Check if we have enough pages to continue
+            if completed_count < total_pages:
+                logger.warning(
+                    f"Only {completed_count} of {total_pages} pages completed successfully. "
+                    f"Continuing with available pages."
+                )
 
-        # Check if we have enough pages to continue
-        if completed_count < total_pages:
-            logger.warning(
-                f"Only {completed_count} of {total_pages} pages completed successfully. "
-                f"Continuing with available pages."
-            )
+            # Filter out None values (failed pages) from images_for_pdf
+            images_for_pdf = [img for img in images_for_pdf if img is not None]
 
-        # Filter out None values (failed pages) from images_for_pdf
-        images_for_pdf = [img for img in images_for_pdf if img is not None]
+            if len(images_for_pdf) == 0:
+                raise ValueError("No pages were successfully generated")
 
-        if len(images_for_pdf) == 0:
-            raise ValueError("No pages were successfully generated")
+            # Step 6: Create PDF
+            progress_tracker[session_id].update({'progress': 95, 'status': 'Creating PDF...'})
+            socketio.emit('progress_update', {
+                'session_id': session_id,
+                'progress': 95,
+                'status': 'Creating PDF...'
+            }, room=session_id)
+            output_path = os.path.join(app.config['OUTPUT_FOLDER'], f'{session_id}.pdf')
+            create_simple_pdf(images_for_pdf, output_path)
 
-        # Step 6: Create PDF
-        progress_tracker[session_id].update({'progress': 95, 'status': 'Creating PDF...'})
-        socketio.emit('progress_update', {
-            'session_id': session_id,
-            'progress': 95,
-            'status': 'Creating PDF...'
-        }, room=session_id)
-        output_path = os.path.join(app.config['OUTPUT_FOLDER'], f'{session_id}.pdf')
-        create_simple_pdf(images_for_pdf, output_path)
+            progress_tracker[session_id].update({
+                'progress': 100,
+                'status': 'Complete!',
+                'pdf_path': output_path,
+                'completed': True,
+                'completed_at': datetime.now().isoformat()
+            })
 
-        progress_tracker[session_id].update({
-            'progress': 100,
-            'status': 'Complete!',
-            'pdf_path': output_path,
-            'completed': True,
-            'completed_at': datetime.now().isoformat()
-        })
-        socketio.emit('generation_complete', {
-            'session_id': session_id,
-            'pdf_path': output_path
-        }, room=session_id)
-        logger.info(f"Book generation completed for session {session_id}")
+            # === DATABASE INTEGRATION: Update book status ===
+            try:
+                db_utils.update_book_status(
+                    session_id=session_id,
+                    status='completed',
+                    pdf_path=output_path
+                )
+                db_utils.create_log(
+                    level='INFO',
+                    message=f'Book generation completed successfully',
+                    session_id=session_id
+                )
+            except Exception as db_error:
+                logger.error(f"Database error updating book status: {db_error}")
 
-    except (OSError, IOError, FileNotFoundError) as file_error:
-        logger.error(f"File error in book generation for session {session_id}: {file_error}", exc_info=True)
-        progress_tracker[session_id] = {
-            'progress': 0,
-            'status': f'Error: {str(file_error)}',
-            'error': str(file_error),
-            'completed': False
-        }
-    except (json.JSONDecodeError, KeyError, ValueError) as data_error:
-        logger.error(f"Data error in book generation for session {session_id}: {data_error}", exc_info=True)
-        progress_tracker[session_id] = {
-            'progress': 0,
-            'status': f'Error: {str(data_error)}',
-            'error': str(data_error),
-            'completed': False
-        }
-    except requests.exceptions.RequestException as api_error:
-        logger.error(f"API error in book generation for session {session_id}: {api_error}", exc_info=True)
-        progress_tracker[session_id] = {
-            'progress': 0,
-            'status': f'Error: {str(api_error)}',
-            'error': str(api_error),
-            'completed': False
-        }
+            socketio.emit('generation_complete', {
+                'session_id': session_id,
+                'pdf_path': output_path
+            }, room=session_id)
+            logger.info(f"Book generation completed for session {session_id}")
+
+        except Exception as error:
+            logger.error(f"Error in book generation for session {session_id}: {error}", exc_info=True)
+            progress_tracker[session_id] = {
+                'progress': 0,
+                'status': f'Error: {str(error)}',
+                'error': str(error),
+                'completed': False
+            }
+
+            # === DATABASE INTEGRATION: Update book status to failed ===
+            try:
+                db_utils.update_book_status(
+                    session_id=session_id,
+                    status='failed',
+                    error_message=str(error)
+                )
+                db_utils.create_log(
+                    level='ERROR',
+                    message=f'Book generation failed: {str(error)}',
+                    session_id=session_id
+                )
+            except Exception as db_error:
+                logger.error(f"Database error updating failed status: {db_error}")
+
+        except (OSError, IOError, FileNotFoundError) as file_error:
+            logger.error(f"File error in book generation for session {session_id}: {file_error}", exc_info=True)
+            progress_tracker[session_id] = {
+                'progress': 0,
+                'status': f'Error: {str(file_error)}',
+                'error': str(file_error),
+                'completed': False
+            }
+        except (json.JSONDecodeError, KeyError, ValueError) as data_error:
+            logger.error(f"Data error in book generation for session {session_id}: {data_error}", exc_info=True)
+            progress_tracker[session_id] = {
+                'progress': 0,
+                'status': f'Error: {str(data_error)}',
+                'error': str(data_error),
+                'completed': False
+            }
+        except requests.exceptions.RequestException as api_error:
+            logger.error(f"API error in book generation for session {session_id}: {api_error}", exc_info=True)
+            progress_tracker[session_id] = {
+                'progress': 0,
+                'status': f'Error: {str(api_error)}',
+                'error': str(api_error),
+                'completed': False
+            }
 
 
 @app.route('/')
@@ -991,7 +1051,7 @@ def upload():
             uploaded_file.seek(0)
             test_img = Image.open(io.BytesIO(uploaded_file.read()))
             test_img.verify()
-            uploaded_file.seek(0)  # Reset file pointer
+            uploaded_file.seek(0)
         except (OSError, IOError) as img_error:
             logger.warning(f"Invalid image file uploaded: {img_error}")
             return jsonify({'error': 'File is not a valid image'}), 400
@@ -1004,10 +1064,12 @@ def upload():
 
         # Validate gender-story pairing
         if gender == 'Boy' and story_type != 'jack_and_the_beanstalk':
-            return jsonify({'error': 'Story selection does not match gender selection. Boys can only select "Jack and the Beanstalk".'}), 400
-        
+            return jsonify({
+                               'error': 'Story selection does not match gender selection. Boys can only select "Jack and the Beanstalk".'}), 400
+
         if gender == 'Girl' and story_type != 'little_red_riding_hood':
-            return jsonify({'error': 'Story selection does not match gender selection. Girls can only select "Little Red Riding Hood".'}), 400
+            return jsonify({
+                               'error': 'Story selection does not match gender selection. Girls can only select "Little Red Riding Hood".'}), 400
 
         if not openai_api_key:
             return jsonify(
@@ -1025,28 +1087,59 @@ def upload():
         uploaded_file.save(file_path)
         logger.info(f"File uploaded: {filename} for session {session_id}")
 
-        # --- Convert uploaded image to safe PNG format for OpenAI ---
+        # Convert uploaded image to safe PNG format for OpenAI
         try:
             img = Image.open(file_path).convert("RGB")
             safe_path = os.path.splitext(file_path)[0] + "_safe.png"
             img.save(safe_path, format="PNG")
-            os.remove(file_path)  # remove original AVIF/HEIC/etc.
+            os.remove(file_path)
             file_path = safe_path
             logger.info(f"Converted uploaded image to safe PNG: {file_path}")
         except Exception as e:
             logger.error(f"Failed to convert uploaded image to PNG: {e}")
             return jsonify({'error': 'Failed to convert uploaded image to supported format.'}), 400
 
-        # --- Validate image before starting generation ---
+        # Validate image before starting generation
         is_valid, validation_error = validate_image(file_path)
         if not is_valid:
-            # Clean up the uploaded file if validation fails
             try:
                 if os.path.exists(file_path):
                     os.remove(file_path)
             except Exception as cleanup_error:
                 logger.warning(f"Failed to clean up invalid image: {cleanup_error}")
             return jsonify({'error': validation_error}), 400
+
+        # === DATABASE INTEGRATION: Create book record ===
+        try:
+            # Get storyline from database
+            story_title = STORY_TEMPLATES[story_type]['title']
+            storyline = db_utils.get_storyline_by_name(story_title)
+
+            if not storyline:
+                logger.error(f"Storyline not found in database: {story_title}")
+                return jsonify({'error': 'Story template not found'}), 500
+
+            # Create book record (user_id is None for anonymous users)
+            book = db_utils.create_book(
+                session_id=session_id,
+                story_id=storyline.id,
+                child_name=child_name,
+                user_id=None  # Set to actual user_id when authentication is implemented
+            )
+
+            # Update status to processing
+            db_utils.update_book_status(session_id, 'processing')
+
+            # Create log entry
+            db_utils.create_log(
+                level='INFO',
+                message=f'Started book generation for {child_name}',
+                session_id=session_id
+            )
+
+        except Exception as db_error:
+            logger.error(f"Database error creating book record: {db_error}")
+            # Continue anyway - don't fail the request due to DB issues
 
         # Clean up old sessions periodically
         cleanup_old_sessions()
@@ -1081,6 +1174,20 @@ def request_entity_too_large(error):
     """Handle file too large errors"""
     logger.error(error)
     return jsonify({'error': 'File too large. Maximum size is 16MB'}), 413
+
+
+@app.route('/api/books/<session_id>')
+def api_book_details(session_id):
+    """Get book details from database"""
+    try:
+        book = db_utils.get_book_by_session(session_id)
+        if not book:
+            return jsonify({'error': 'Book not found'}), 404
+
+        return jsonify(book.to_dict())
+    except Exception as e:
+        logger.error(f"Error fetching book details: {e}")
+        return jsonify({'error': 'Internal server error'}), 500
 
 
 @app.route('/progress/<session_id>')
@@ -1190,7 +1297,19 @@ def handle_join_session(data):
 @app.route('/health')
 def health():
     """Health check endpoint for deployment monitoring"""
-    return jsonify({'status': 'healthy', 'service': 'fairy_tale_generator'})
+    try:
+        # Test database connection
+        db.session.execute(db.text('SELECT 1'))
+        db_status = 'healthy'
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        db_status = 'unhealthy'
+
+    return jsonify({
+        'status': 'healthy' if db_status == 'healthy' else 'degraded',
+        'service': 'fairy_tale_generator',
+        'database': db_status
+    })
 
 
 if __name__ == '__main__':
