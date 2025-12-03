@@ -726,178 +726,163 @@ def generate_book_async(session_id, image_path, story_type, gender, child_name):
         }, room=session_id)
         template_images = load_template_images(story_type)
 
-        # Step 4: Generate complete pages with AI (face + text)
-        images_for_pdf = []
+        # Step 4: Prepare all pages including cover
+        images_for_pdf = [None] * 13  # Placeholder list for all pages (0=cover, 1-12=story pages)
         pages_dir = os.path.join(app.config['OUTPUT_FOLDER'], 'pages', session_id)
         os.makedirs(pages_dir, exist_ok=True)
 
-        # Process cover image (page 0)
-        progress_tracker[session_id].update({'progress': 20, 'status': 'Creating cover page...'})
-        socketio.emit('progress_update', {
-            'session_id': session_id,
-            'progress': 20,
-            'status': 'Creating cover page...'
-        }, room=session_id)
-        cover_img = template_images[0][1]
-        cover_text = f"{story_data.get('title', '')}\n{story_data.get('subtitle', '')}"
-
-        # Generate complete cover with AI
-        cover_with_face_and_text = generate_page_with_ai(
-            cover_img,
-            image_path,
-            cover_text,
-            character_description,
-            story_type
-        )
-        images_for_pdf.append(cover_with_face_and_text)
-        
-        # Save cover image
-        cover_path = os.path.join(pages_dir, 'cover.png')
-        cover_with_face_and_text.save(cover_path, 'PNG')
-        cover_url = f'/page_image/{session_id}/cover'
-        
-        # Update progress tracker and emit event
-        progress_tracker[session_id]['pages']['cover'] = {
-            'page_number': 0,
-            'image_url': cover_url,
-            'status': 'complete'
-        }
-        socketio.emit('page_complete', {
-            'session_id': session_id,
-            'page_number': 0,
-            'image_url': cover_url,
-            'status': 'complete',
-            'page_name': 'cover'
-        }, room=session_id)
-
-        # Step 4b: Generate all story pages concurrently using ThreadPoolExecutor
+        # Prepare page tasks including cover
         pages = story_data.get('pages', [])
-        total_pages = len(pages)
-        
-        # Update status to indicate concurrent generation (cover is already done, so start at 25%)
-        progress_tracker[session_id].update({
-            'progress': 25,
-            'status': f'Generating {total_pages} story pages concurrently...'
+        all_page_tasks = []
+
+        # Add cover as page 0
+        cover_text = f"{story_data.get('title', '')}\n{story_data.get('subtitle', '')}"
+        all_page_tasks.append({
+            'page_number': 0,
+            'text': cover_text,
+            'index': -1  # Special index for cover
         })
-        socketio.emit('progress_update', {
-            'session_id': session_id,
-            'progress': 25,
-            'status': f'Generating {total_pages} story pages concurrently...'
-        }, room=session_id)
-        
-        # Prepare page data for concurrent processing
-        page_tasks = []
+
+        # Add story pages 1-12
         for idx, page_data in enumerate(pages):
             page_num = page_data.get('page_number', idx + 1)
-            page_tasks.append({
+            all_page_tasks.append({
                 'page_number': page_num,
                 'text': page_data.get('text', ''),
                 'index': idx
             })
-        
-        # Use ThreadPoolExecutor to generate pages concurrently
-        # Limit to 5 workers at a time to avoid overwhelming the API and reaching usage limits
-        max_workers = min(5, total_pages)
-        page_results = {}  # Dictionary to store results by page number
+
+        total_pages = len(all_page_tasks)  # Should be 13
+
+        # Step 5: Process pages in batches
+        # Batch 1: Cover + Pages 1-4 (5 pages)
+        # Batch 2: Pages 5-9 (5 pages)
+        # Batch 3: Pages 10-12 (3 pages)
+        batches = [
+            all_page_tasks[0:5],  # Cover (0) + Pages 1-4
+            all_page_tasks[5:10],  # Pages 5-9
+            all_page_tasks[10:13]  # Pages 10-12
+        ]
+
         completed_count = 0
         failed_count = 0
         timing_logs = []
-        
-        logger.info(f"Starting concurrent generation of {total_pages} pages with {max_workers} workers")
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all page generation tasks
-            future_to_page = {}
-            for page_task in page_tasks:
-                future = executor.submit(
-                    generate_page_image,
-                    page_task,
-                    session_id,
-                    image_path,
-                    character_description,
-                    story_type,
-                    template_images,
-                    pages_dir
-                )
-                future_to_page[future] = page_task['page_number']
-            
-            # Process completed tasks as they finish
-            for future in as_completed(future_to_page):
-                page_num = future_to_page[future]
-                try:
-                    result = future.result()
-                    page_num_result, success, result_image, error_msg, timing_info = result
-                    
-                    # Log timing information
-                    timing_logs.append(timing_info)
-                    logger.info(
-                        f"Page {page_num_result} timing: {timing_info.get('elapsed_time', 0):.2f}s, "
-                        f"attempts: {timing_info.get('attempts', 1)}, "
-                        f"thread: {timing_info.get('thread_id', 'N/A')}"
+
+        for batch_num, batch_tasks in enumerate(batches, 1):
+            batch_size = len(batch_tasks)
+            page_nums = [task['page_number'] for task in batch_tasks]
+
+            progress_tracker[session_id].update({
+                'progress': 20 + (batch_num - 1) * 25,
+                'status': f'Generating batch {batch_num}/3 (pages {page_nums})...'
+            })
+            socketio.emit('progress_update', {
+                'session_id': session_id,
+                'progress': 20 + (batch_num - 1) * 25,
+                'status': f'Generating batch {batch_num}/3...'
+            }, room=session_id)
+
+            logger.info(f"Starting batch {batch_num} with {batch_size} pages: {page_nums}")
+
+            # Process this batch concurrently
+            max_workers = min(5, batch_size)
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all page generation tasks for this batch
+                future_to_page = {}
+                for page_task in batch_tasks:
+                    future = executor.submit(
+                        generate_page_image,
+                        page_task,
+                        session_id,
+                        image_path,
+                        character_description,
+                        story_type,
+                        template_images,
+                        pages_dir
                     )
-                    
-                    if success and result_image:
-                        # Store result in dictionary (ordered by page number)
-                        page_results[page_num_result] = result_image
-                        completed_count += 1
-                        
-                        # Update progress in real-time (cover is 5%, pages are 25-95%)
-                        progress_per_page = 70 / total_pages
-                        current_progress = 25 + int(completed_count * progress_per_page)
-                        
-                        # Determine page name and URL
-                        if page_num_result == 0:
-                            page_name = 'cover'
-                            page_url = f'/page_image/{session_id}/cover'
+                    future_to_page[future] = page_task['page_number']
+
+                # Process completed tasks as they finish
+                for future in as_completed(future_to_page):
+                    page_num = future_to_page[future]
+                    try:
+                        result = future.result()
+                        page_num_result, success, result_image, error_msg, timing_info = result
+
+                        # Log timing information
+                        timing_logs.append(timing_info)
+                        logger.info(
+                            f"Page {page_num_result} timing: {timing_info.get('elapsed_time', 0):.2f}s, "
+                            f"attempts: {timing_info.get('attempts', 1)}, "
+                            f"thread: {timing_info.get('thread_id', 'N/A')}"
+                        )
+
+                        if success and result_image:
+                            # Store result in correct position
+                            images_for_pdf[page_num_result] = result_image
+                            completed_count += 1
+
+                            # Update progress in real-time
+                            progress_per_page = 70 / total_pages
+                            current_progress = 20 + int(completed_count * progress_per_page)
+
+                            # Determine page name and URL
+                            if page_num_result == 0:
+                                page_name = 'cover'
+                                page_url = f'/page_image/{session_id}/cover'
+                            else:
+                                page_name = f'page_{page_num_result}'
+                                page_url = f'/page_image/{session_id}/{page_num_result}'
+
+                            # Update progress tracker
+                            progress_tracker[session_id]['pages'][page_name] = {
+                                'page_number': page_num_result,
+                                'image_url': page_url,
+                                'status': 'complete',
+                                'timing': timing_info
+                            }
+
+                            # Emit real-time progress update
+                            socketio.emit('page_complete', {
+                                'session_id': session_id,
+                                'page_number': page_num_result,
+                                'image_url': page_url,
+                                'status': 'complete',
+                                'page_name': page_name
+                            }, room=session_id)
+
+                            socketio.emit('progress_update', {
+                                'session_id': session_id,
+                                'progress': current_progress,
+                                'status': f'Completed {completed_count} of {total_pages} pages...'
+                            }, room=session_id)
+
+                            logger.info(f"✅ Page {page_num_result} completed successfully")
                         else:
-                            page_name = f'page_{page_num_result}'
-                            page_url = f'/page_image/{session_id}/{page_num_result}'
-                        
-                        # Update progress tracker
-                        progress_tracker[session_id]['pages'][page_name] = {
-                            'page_number': page_num_result,
-                            'image_url': page_url,
-                            'status': 'complete',
-                            'timing': timing_info
-                        }
-                        
-                        # Emit real-time progress update
-                        socketio.emit('page_complete', {
-                            'session_id': session_id,
-                            'page_number': page_num_result,
-                            'image_url': page_url,
-                            'status': 'complete',
-                            'page_name': page_name
-                        }, room=session_id)
-                        
-                        socketio.emit('progress_update', {
-                            'session_id': session_id,
-                            'progress': current_progress,
-                            'status': f'Completed {completed_count} of {total_pages} pages...'
-                        }, room=session_id)
-                        
-                        logger.info(f"✅ Page {page_num_result} completed successfully")
-                    else:
+                            failed_count += 1
+                            logger.error(f"❌ Page {page_num_result} failed: {error_msg}")
+
+                            # Mark as failed in progress tracker
+                            page_name = 'cover' if page_num_result == 0 else f'page_{page_num_result}'
+                            progress_tracker[session_id]['pages'][page_name] = {
+                                'page_number': page_num_result,
+                                'status': 'failed',
+                                'error': error_msg
+                            }
+
+                    except Exception as e:
                         failed_count += 1
-                        logger.error(f"❌ Page {page_num_result} failed: {error_msg}")
-                        
-                        # Even if generation failed, we should still try to continue
-                        # The page_results dictionary will be missing this page
-                        progress_tracker[session_id]['pages'][f'page_{page_num_result}'] = {
-                            'page_number': page_num_result,
+                        logger.error(f"❌ Exception processing page {page_num}: {e}", exc_info=True)
+                        page_name = 'cover' if page_num == 0 else f'page_{page_num}'
+                        progress_tracker[session_id]['pages'][page_name] = {
+                            'page_number': page_num,
                             'status': 'failed',
-                            'error': error_msg
+                            'error': str(e)
                         }
-                        
-                except Exception as e:
-                    failed_count += 1
-                    logger.error(f"❌ Exception processing page {page_num}: {e}", exc_info=True)
-                    progress_tracker[session_id]['pages'][f'page_{page_num}'] = {
-                        'page_number': page_num,
-                        'status': 'failed',
-                        'error': str(e)
-                    }
-        
+
+            logger.info(f"Batch {batch_num} completed. Progress: {completed_count}/{total_pages}")
+
         # Log performance summary
         if timing_logs:
             total_time = sum(t.get('elapsed_time', 0) for t in timing_logs)
@@ -909,23 +894,21 @@ def generate_book_async(session_id, image_path, story_type, gender, child_name):
                 f"Avg: {avg_time:.2f}s, Max: {max_time:.2f}s, Min: {min_time:.2f}s, "
                 f"Completed: {completed_count}/{total_pages}, Failed: {failed_count}"
             )
-        
+
         # Check if we have enough pages to continue
         if completed_count < total_pages:
             logger.warning(
                 f"Only {completed_count} of {total_pages} pages completed successfully. "
                 f"Continuing with available pages."
             )
-        
-        # Build images_for_pdf list in correct order (cover already added, then pages 1-12)
-        # Cover is already in images_for_pdf, so just add story pages in order
-        for page_num in range(1, 13):
-            if page_num in page_results:
-                images_for_pdf.append(page_results[page_num])
-            else:
-                logger.warning(f"Page {page_num} missing from results, skipping in PDF")
 
-        # Step 5: Create PDF (simplified - no text needed)
+        # Filter out None values (failed pages) from images_for_pdf
+        images_for_pdf = [img for img in images_for_pdf if img is not None]
+
+        if len(images_for_pdf) == 0:
+            raise ValueError("No pages were successfully generated")
+
+        # Step 6: Create PDF
         progress_tracker[session_id].update({'progress': 95, 'status': 'Creating PDF...'})
         socketio.emit('progress_update', {
             'session_id': session_id,
