@@ -226,7 +226,7 @@
         <p class="subtitle">Watch your personalized story come to life!</p>
 
         <div class="progress-header">
-            <div class="progress-text" id="progressText">Page 0 of 12 complete</div>
+            <div class="progress-text" id="progressText">Page 0 of 13 complete</div>
             <div class="status-message" id="statusMessage">Starting...</div>
             <div class="progress-bar-container">
                 <div class="progress-bar" id="progressBar"></div>
@@ -255,17 +255,18 @@
         const errorMessage = document.getElementById('errorMessage');
 
         const pages = {};
-        const totalPages = 12; // 12 story pages (cover is page 0)
+        const totalPages = 13; // 1 cover + 12 story pages
+        let isComplete = false;
 
         // Initialize page cards
         function initializePages() {
-            // Create cover card
+            // Create cover card (page 0)
             const coverCard = createPageCard(0, 'Cover');
             pagesGrid.appendChild(coverCard);
             pages[0] = { card: coverCard, status: 'pending' };
 
-            // Create story page cards
-            for (let i = 1; i <= totalPages; i++) {
+            // Create story page cards (pages 1-12)
+            for (let i = 1; i <= 12; i++) {
                 const pageCard = createPageCard(i, `Page ${i}`);
                 pagesGrid.appendChild(pageCard);
                 pages[i] = { card: pageCard, status: 'pending' };
@@ -286,12 +287,17 @@
         }
 
         function updatePageCard(pageNumber, imageUrl) {
+            console.log(`Updating page ${pageNumber} with image: ${imageUrl}`);
+
             if (pages[pageNumber]) {
                 const card = pages[pageNumber].card;
                 card.classList.remove('pending');
                 card.classList.add('complete');
                 const img = card.querySelector('.page-image');
-                img.src = imageUrl;
+
+                // Add cache-busting timestamp to force reload
+                img.src = imageUrl + '?t=' + Date.now();
+
                 pages[pageNumber].status = 'complete';
                 updateProgressText();
             }
@@ -299,8 +305,7 @@
 
         function updateProgressText() {
             const completedCount = Object.values(pages).filter(p => p.status === 'complete').length;
-            const total = totalPages + 1; // +1 for cover
-            progressText.textContent = `Page ${completedCount} of ${total} complete`;
+            progressText.textContent = `Page ${completedCount} of ${totalPages} complete`;
         }
 
         function updateProgressBar(progress) {
@@ -312,23 +317,31 @@
             errorMessage.classList.add('active');
         }
 
-        // Socket.IO event handlers
+        function showComplete() {
+            if (!isComplete) {
+                isComplete = true;
+                downloadBtn.href = `/download/${sessionId}`;
+                downloadContainer.classList.add('active');
+                statusMessage.textContent = 'Complete! Your book is ready to download.';
+                updateProgressBar(100);
+            }
+        }
+
+        // Socket.IO event handlers (for initial connection and fast updates)
         socket.on('connect', () => {
             console.log('Connected to server');
             socket.emit('join_session', { session_id: sessionId });
         });
 
         socket.on('page_complete', (data) => {
-            console.log('Page complete:', data);
-            if (data.session_id === sessionId) {
-                const pageNumber = data.page_number;
-                const imageUrl = data.image_url;
-                updatePageCard(pageNumber, imageUrl);
+            console.log('Socket.IO page_complete:', data);
+            if (data.session_id === sessionId && data.page_number >= 0) {
+                updatePageCard(data.page_number, data.image_url);
             }
         });
 
         socket.on('progress_update', (data) => {
-            console.log('Progress update:', data);
+            console.log('Socket.IO progress_update:', data);
             if (data.session_id === sessionId) {
                 updateProgressBar(data.progress);
                 statusMessage.textContent = data.status || 'Processing...';
@@ -336,72 +349,69 @@
         });
 
         socket.on('generation_complete', (data) => {
-            console.log('Generation complete:', data);
+            console.log('Socket.IO generation_complete:', data);
             if (data.session_id === sessionId) {
-                downloadBtn.href = `/download/${sessionId}`;
-                downloadContainer.classList.add('active');
-                statusMessage.textContent = 'Complete! Your book is ready to download.';
-                updateProgressBar(100);
+                showComplete();
             }
         });
 
         socket.on('disconnect', () => {
             console.log('Disconnected from server');
-            showError('Connection lost. Please refresh the page.');
         });
 
         socket.on('connect_error', (error) => {
             console.error('Connection error:', error);
-            showError('Failed to connect to server. Please refresh the page.');
         });
 
         // Initialize on page load
         initializePages();
 
-        // Fallback: Poll for progress if Socket.IO fails
-        let fallbackInterval = null;
-        setTimeout(() => {
-            if (!socket.connected) {
-                console.log('Socket.IO not connected, using fallback polling');
-                fallbackInterval = setInterval(async () => {
-                    try {
-                        const response = await fetch(`/api/progress/${sessionId}`);
-                        const data = await response.json();
-                        
-                        if (data.error) {
-                            showError(data.error);
-                            clearInterval(fallbackInterval);
-                            return;
-                        }
+        // CRITICAL: Always use polling as primary mechanism
+        // Socket.IO can't push updates during long-running operations (25s timeout)
+        // So we poll every 2 seconds to catch updates
+        console.log('Starting polling for session:', sessionId);
 
-                        updateProgressBar(data.progress || 0);
-                        statusMessage.textContent = data.status || 'Processing...';
-
-                        // Update completed pages
-                        const completedPages = data.pages || {};
-                        for (const [pageName, pageInfo] of Object.entries(completedPages)) {
-                            if (pageInfo.status === 'complete') {
-                                const pageNumber = pageInfo.page_number;
-                                if (pages[pageNumber] && pages[pageNumber].status !== 'complete') {
-                                    updatePageCard(pageNumber, pageInfo.image_url);
-                                }
-                            }
-                        }
-
-                        // Check if complete
-                        if (data.completed) {
-                            clearInterval(fallbackInterval);
-                            downloadBtn.href = `/download/${sessionId}`;
-                            downloadContainer.classList.add('active');
-                            statusMessage.textContent = 'Complete! Your book is ready to download.';
-                            updateProgressBar(100);
-                        }
-                    } catch (error) {
-                        console.error('Error fetching progress:', error);
-                    }
-                }, 2000);
+        const pollingInterval = setInterval(async () => {
+            if (isComplete) {
+                clearInterval(pollingInterval);
+                return;
             }
-        }, 3000);
+
+            try {
+                const response = await fetch(`/api/progress/${sessionId}`);
+                const data = await response.json();
+
+                if (data.error) {
+                    showError(data.error);
+                    clearInterval(pollingInterval);
+                    return;
+                }
+
+                // Update progress bar and status
+                updateProgressBar(data.progress || 0);
+                statusMessage.textContent = data.status || 'Processing...';
+
+                // Update completed pages
+                const completedPages = data.pages || {};
+                for (const [pageName, pageInfo] of Object.entries(completedPages)) {
+                    if (pageInfo.status === 'complete') {
+                        const pageNumber = pageInfo.page_number;
+                        if (pages[pageNumber] && pages[pageNumber].status !== 'complete') {
+                            console.log(`Polling found completed page ${pageNumber}`);
+                            updatePageCard(pageNumber, pageInfo.image_url);
+                        }
+                    }
+                }
+
+                // Check if complete
+                if (data.completed) {
+                    clearInterval(pollingInterval);
+                    showComplete();
+                }
+            } catch (error) {
+                console.error('Error fetching progress:', error);
+            }
+        }, 2000); // Poll every 2 seconds
     </script>
 </body>
 </html>

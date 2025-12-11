@@ -6,18 +6,20 @@ from database import db
 from sqlalchemy import Integer, String, Text, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from typing import Optional, List
+from flask_login import UserMixin
 
 def utc_now():
     """Return current UTC time with timezone awareness"""
     return datetime.now(timezone.utc)
 
-class User(db.Model):
+class User(UserMixin, db.Model):
     """User model for authentication and tracking"""
     __tablename__ = 'users'
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     oauth_provider: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, nullable=False)
 
@@ -94,6 +96,7 @@ class Book(db.Model):
             'id': self.id,
             'user_id': self.user_id,
             'story_id': self.story_id,
+            'story_name': self.storyline.story_name if self.storyline else None,
             'child_name': self.child_name,
             'pdf_path': self.pdf_path,
             'session_id': self.session_id,
