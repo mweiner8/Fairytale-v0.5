@@ -8,7 +8,7 @@ All names are stored in lowercase for case-insensitive matching.
 # This list includes popular names from various cultures and time periods
 COMMON_FIRST_NAMES = {
     # Common English names
-    'alice', 'bob', 'charlie', 'david', 'emma', 'frank', 'grace', 'henry', 'isabella', 'jack',
+    'alice', 'bob', 'bill', 'billy', 'charlie', 'david', 'emma', 'frank', 'grace', 'henry', 'isabella', 'jack',
     'kate', 'lily', 'mary', 'noah', 'olivia', 'paul', 'quinn', 'rachel', 'samuel', 'thomas',
     'una', 'victor', 'william', 'xavier', 'yasmine', 'zoe',
     # Additional common names
@@ -163,7 +163,7 @@ COMMON_FIRST_NAMES = {
     'velma', 'venus', 'vera', 'veronica', 'viana', 'vicente', 'victor', 'victoria', 'vida',
     'vienna', 'vihaan', 'vincent', 'vincenzo', 'violet', 'violeta', 'virginia', 'vivaan',
     'vivian', 'viviana', 'vivienne', 'vladimir', 'wade', 'walker', 'wallace', 'walter',
-    'warren', 'watson', 'waylon', 'wayne', 'wesley', 'westin', 'weston', 'whitney', 'will',
+    'warren', 'watson', 'waylon', 'wayne', 'wesley', 'westin', 'weston', 'whitney', 'will', 'willy',
     'willa', 'william', 'willie', 'willow', 'wilson', 'winston', 'winter', 'wisdom', 'wren',
     'wyatt', 'xander', 'xavier', 'ximena', 'xiomara', 'xyla', 'yadiel', 'yahir', 'yahya',
     'yara', 'yareli', 'yaretzi', 'yasmine', 'yazmin', 'yehuda', 'yehudah', 'yisroel',
