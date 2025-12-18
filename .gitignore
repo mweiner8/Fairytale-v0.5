@@ -207,3 +207,11 @@ marimo/_lsp/
 __marimo__/
 
 .idea/
+.db
+fairy_tale.db
+uploads/
+outputs/*
+pycache/
+*.pyc
+*.pyo
+.vscode/

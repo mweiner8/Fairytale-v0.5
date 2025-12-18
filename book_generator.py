@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import gevent
 from datetime import datetime
 from config import Config
 from gevent import spawn, joinall
@@ -35,6 +36,8 @@ def generate_page_image(
     last_error = None
 
     try:
+        gevent.sleep(0)
+
         # Select template
         template_img = template_images[0][1] if page_num == 0 else template_images[page_num][1]
 
@@ -52,10 +55,12 @@ def generate_page_image(
                     openai_client,
                     Config.UPLOAD_FOLDER
                 )
+                gevent.sleep(0)
                 break
             except Exception as e:
                 last_error = e
                 time.sleep((attempt + 1) * 2)
+                gevent.sleep(0)
 
         if complete_page is None:
             # Fallback if AI generation fails
@@ -78,7 +83,8 @@ def generate_page_image(
         }
 
         logger.info(f"✅ Page {page_num} completed in {elapsed:.2f}s")
-        logger.info(f"   Stored as '{page_name}' in progress tracker. Total pages: {len(progress_tracker[session_id]['pages'])}")
+        logger.info(
+            f"   Stored as '{page_name}' in progress tracker. Total pages: {len(progress_tracker[session_id]['pages'])}")
 
         # Emit page-level completion immediately
         try:

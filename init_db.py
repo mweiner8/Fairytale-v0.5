@@ -15,8 +15,8 @@ load_dotenv()
 def create_tables(app):
     """Create all database tables"""
     with app.app_context():
-        # Drop all tables (use with caution in production!)
-        # db.drop_all()
+        # CHANGE THIS: Don't drop tables in production
+        db.drop_all()  # Only uncomment locally when you need to reset
 
         # Create all tables
         db.create_all()

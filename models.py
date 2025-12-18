@@ -76,7 +76,10 @@ class Book(db.Model):
     user_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey('users.id'), nullable=True, index=True)
     story_id: Mapped[int] = mapped_column(Integer, ForeignKey('storylines.id'), nullable=False, index=True)
     child_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    pdf_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    pdf_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)  # Cloudinary URL
+    cloudinary_public_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # For deletion
+
     session_id: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(50), default='pending', nullable=False)  # pending, processing, completed, failed
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -98,7 +101,7 @@ class Book(db.Model):
             'story_id': self.story_id,
             'story_name': self.storyline.story_name if self.storyline else None,
             'child_name': self.child_name,
-            'pdf_path': self.pdf_path,
+            'pdf_url': self.pdf_url,
             'session_id': self.session_id,
             'status': self.status,
             'error_message': self.error_message,

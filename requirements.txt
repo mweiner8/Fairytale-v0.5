@@ -14,9 +14,11 @@ opencv-python
 numpy
 Flask-SQLAlchemy
 psycopg2-binary
+psycogreen
 alembic
 Flask-Migrate
 Flask-Login
 sqlalchemy
 gevent
 gevent-websocket
+cloudinary

@@ -6,6 +6,7 @@ from database import db
 from models import User, Book, Storyline, Log
 from typing import Optional
 import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +96,12 @@ def create_book(session_id: str, story_id: int, child_name: str, user_id: Option
 def update_book_status(session_id: str, status: str, pdf_path: Optional[str] = None,
                       error_message: Optional[str] = None):
     """
-    Update book generation status
+    Update book generation status and upload PDF to Cloudinary
 
     Args:
         session_id: Session identifier
         status: New status ('pending', 'processing', 'completed', 'failed')
-        pdf_path: Path to generated PDF (for completed books)
+        pdf_path: Path to generated PDF (will be uploaded to Cloudinary)
         error_message: Error message (for failed books)
     """
     book = db.session.query(Book).filter_by(session_id=session_id).first()
@@ -110,8 +111,28 @@ def update_book_status(session_id: str, status: str, pdf_path: Optional[str] = N
 
     book.status = status
 
-    if pdf_path:
-        book.pdf_path = pdf_path
+    # Upload PDF to Cloudinary if path provided
+    if pdf_path and os.path.exists(pdf_path):
+        try:
+            # Upload to Cloudinary
+            from cloudinary_utils import upload_pdf
+            result = upload_pdf(pdf_path, public_id=session_id)
+
+            book.pdf_url = result['secure_url']
+            book.cloudinary_public_id = result['public_id']
+
+            logger.info(f"✅ PDF uploaded to Cloudinary for session: {session_id}")
+
+            # Clean up local file after successful upload
+            try:
+                os.remove(pdf_path)
+                logger.info(f"🗑️  Deleted local PDF: {pdf_path}")
+            except Exception as e:
+                logger.warning(f"Failed to delete local PDF: {e}")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to upload PDF to Cloudinary: {e}")
+            # Don't fail the entire operation, just log the error
 
     if error_message:
         book.error_message = error_message

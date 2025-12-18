@@ -29,6 +29,11 @@ class Config:
     OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
     USE_DALLE_GENERATION = os.environ.get('USE_DALLE_GENERATION', 'true').lower() == 'true'
 
+    # Cloudinary Configuration
+    CLOUDINARY_CLOUD_NAME = os.environ.get('CLOUDINARY_CLOUD_NAME')
+    CLOUDINARY_API_KEY = os.environ.get('CLOUDINARY_API_KEY')
+    CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET')
+
     # Rate Limiting Configuration
     MAX_LOGIN_ATTEMPTS = 5
     RATE_LIMIT_WINDOW = 60  # seconds

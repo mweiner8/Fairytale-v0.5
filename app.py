@@ -5,6 +5,12 @@ Manages Flask app initialization and route registration
 from gevent import monkey
 monkey.patch_all()
 
+from psycogreen.gevent import patch_psycopg
+try:
+    patch_psycopg()
+except ImportError:
+    pass
+
 import os
 import logging
 from datetime import timedelta
@@ -27,6 +33,10 @@ logger = logging.getLogger(__name__)
 # Import modules (after logging is configured)
 from database import init_db
 import db_utils
+
+from cloudinary_utils import init_cloudinary
+init_cloudinary()
+logger.info("✅ Cloudinary initialized")
 
 # Import blueprints
 from auth import auth_bp
