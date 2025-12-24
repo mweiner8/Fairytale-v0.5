@@ -3,6 +3,7 @@ Authentication routes and helpers
 """
 import re
 import time
+import os
 from flask import Blueprint, request, jsonify, session, redirect, url_for
 from flask_login import login_user, logout_user, login_required, current_user
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -10,6 +11,7 @@ from database import db
 from models import User
 import logging
 from threading import Lock
+from oauth_config import oauth
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +196,7 @@ def login():
 @auth_bp.route('/api/auth/logout', methods=['POST'])
 @login_required
 def logout():
-    """Logout user — returns JSON for API calls, redirects for browser forms."""
+    """Logout user – returns JSON for API calls, redirects for browser forms."""
     try:
         user_email = current_user.email
         logout_user()
@@ -239,3 +241,81 @@ def check_auth():
         }), 200
     else:
         return jsonify({'authenticated': False}), 200
+
+
+# ============= Google OAuth Routes =============
+
+@auth_bp.route('/api/auth/google/login')
+def google_login():
+    """Initiate Google OAuth login"""
+    try:
+        redirect_uri = url_for('auth.google_callback', _external=True)
+        return oauth.google.authorize_redirect(redirect_uri)
+    except Exception as e:
+        logger.error(f"Google login initiation error: {e}", exc_info=True)
+        return redirect('/?error=oauth_failed')
+
+
+@auth_bp.route('/api/auth/google/callback')
+def google_callback():
+    """Handle Google OAuth callback"""
+    try:
+        # Get the OAuth token
+        token = oauth.google.authorize_access_token()
+
+        # Get user info from Google
+        user_info = token.get('userinfo')
+
+        if not user_info:
+            logger.error("No user info received from Google")
+            return redirect('/?error=oauth_failed')
+
+        email = user_info.get('email')
+        name = user_info.get('name')
+        google_id = user_info.get('sub')
+
+        if not email:
+            logger.error("No email received from Google")
+            return redirect('/?error=oauth_failed')
+
+        # Normalize email
+        email = email.strip().lower()
+
+        # Check if user exists
+        user = db.session.query(User).filter_by(email=email).first()
+
+        if user:
+            # User exists - check if they're linking accounts
+            if user.oauth_provider is None and user.password_hash:
+                # User registered with email/password, now linking Google
+                user.oauth_provider = 'google'
+                db.session.commit()
+                logger.info(f"Linked Google account to existing user: {email}")
+            elif user.oauth_provider == 'google':
+                # User already uses Google OAuth
+                logger.info(f"Existing Google user logged in: {email}")
+            else:
+                # User has a different OAuth provider (future-proofing)
+                logger.warning(f"User {email} tried to login with Google but has provider: {user.oauth_provider}")
+        else:
+            # Create new user
+            user = User(
+                email=email,
+                name=name or email.split('@')[0],
+                password_hash=None,
+                oauth_provider='google'
+            )
+            db.session.add(user)
+            db.session.commit()
+            logger.info(f"New user created via Google OAuth: {email}")
+
+        # Log the user in
+        login_user(user, remember=False, duration=None)
+
+        # Redirect to dashboard
+        return redirect('/dashboard')
+
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Google OAuth callback error: {e}", exc_info=True)
+        return redirect('/?error=oauth_failed')

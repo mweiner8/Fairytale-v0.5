@@ -34,6 +34,13 @@ class Config:
     CLOUDINARY_API_KEY = os.environ.get('CLOUDINARY_API_KEY')
     CLOUDINARY_API_SECRET = os.environ.get('CLOUDINARY_API_SECRET')
 
+    # Google OAuth Configuration
+    GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
+    GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
+
+    # App base URL (for OAuth redirects)
+    APP_BASE_URL = os.environ.get('APP_BASE_URL', 'http://localhost:3000')
+
     # Rate Limiting Configuration
     MAX_LOGIN_ATTEMPTS = 5
     RATE_LIMIT_WINDOW = 60  # seconds

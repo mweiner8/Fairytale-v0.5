@@ -34,10 +34,6 @@ logger = logging.getLogger(__name__)
 from database import init_db
 import db_utils
 
-from cloudinary_utils import init_cloudinary
-init_cloudinary()
-logger.info("✅ Cloudinary initialized")
-
 # Import blueprints
 from auth import auth_bp
 from dashboard import dashboard_bp
@@ -68,6 +64,16 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = None
 login_manager.login_message = None
+
+# Initialize Cloudinary
+from cloudinary_utils import init_cloudinary
+init_cloudinary()
+logger.info("✅ Cloudinary initialized")
+
+# Initialize OAuth
+from oauth_config import init_oauth
+init_oauth(app)
+logger.info("✅ OAuth initialized")
 
 
 @login_manager.user_loader
