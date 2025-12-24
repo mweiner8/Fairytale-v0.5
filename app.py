@@ -42,7 +42,7 @@ from routes.book_routes import book_bp
 from routes.api_routes import api_bp
 
 # Initialize Flask app
-app = Flask(__name__)
+app = Flask(__name__, static_folder='templates/static')
 app.config.from_object(Config)
 
 # Initialize extensions with longer timeouts for long-running operations
